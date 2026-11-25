@@ -7,12 +7,21 @@ pub struct SyntaxFacts {
     #[serde(default)]
     pub file: Value,
     #[serde(default)]
+    pub notebook: Option<Notebook>,
+    #[serde(default)]
     pub display_names: BTreeMap<String, String>,
     #[serde(default)]
     pub containers: BTreeMap<String, String>,
     pub declarations: BTreeMap<String, Definition>,
     pub edges: Vec<Edge>,
     pub sites: BTreeMap<usize, Vec<Site>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Notebook {
+    pub kernel: String,
+    pub lines: usize,
+    pub languages: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

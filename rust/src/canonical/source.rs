@@ -70,7 +70,15 @@ impl Source {
     }
 
     pub fn parse(path: &Path, source: &str) -> Result<Self> {
-        let language = if crate::parser::bash::supports(path, source.as_bytes()) {
+        if let Some(language) = crate::parser::extensions::web::language(path) {
+            let page = crate::parser::extensions::web::Page::read(language, source)?;
+            let mut parsed = Self::parse(page.script_path(), page.source())?;
+            parsed.language = language;
+            return Ok(parsed);
+        }
+        let language = if crate::parser::extensions::notebook::export(path, source) {
+            Some("notebook")
+        } else if crate::parser::bash::supports(path, source.as_bytes()) {
             Some("bash")
         } else {
             match path.extension().and_then(|s| s.to_str()) {

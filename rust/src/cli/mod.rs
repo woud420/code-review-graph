@@ -1,24 +1,24 @@
 mod args;
-mod build;
 mod changes;
+mod doctor;
+mod index;
+use index::{build, hooks, search, store};
 use reports::{eval, history};
-mod hooks;
 mod install;
 mod mcp;
 mod query;
 mod registry;
 mod reports;
-mod search;
-mod store;
 use query::terms;
 mod visualize;
+mod watch;
 mod wiki;
 mod wire;
 
 use anyhow::{Result, ensure};
-use args::{Cli, Command};
-use clap::CommandFactory;
+use args::Command;
 use code_review_graph_rs::canonical;
+use std::io::IsTerminal;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -48,8 +48,16 @@ pub fn dispatch() -> Result<()> {
         ));
     }
     let Some(command) = args::parse().command else {
-        Cli::command().print_help()?;
-        println!();
+        let banner: &str = include_str!("../../assets/cli/banner.json");
+        let mut banner: String = serde_json::from_str(banner)?;
+        if !std::io::stdout().is_terminal()
+            || std::env::var_os("NO_COLOR").is_some_and(|s| !s.is_empty())
+        {
+            for code in ["0", "1", "2", "32", "33", "36"] {
+                banner = banner.replace(&format!("\x1b[{code}m"), "");
+            }
+        }
+        print!("{banner}");
         return Ok(());
     };
     match command {
@@ -120,6 +128,15 @@ pub fn dispatch() -> Result<()> {
         Command::Repos => registry::print(),
         Command::Register { path, alias } => registry::register(&path, alias),
         Command::Unregister { path_or_alias } => registry::unregister(&path_or_alias),
+        Command::Doctor { repo, json } => {
+            let given = root(repo.as_deref(), false)?;
+            let root = if repo.is_some() && given.is_dir() {
+                store::project_root(&given).unwrap_or(given)
+            } else {
+                given
+            };
+            std::process::exit(doctor::run(&root, json)?);
+        }
         Command::Status {
             location,
             quiet,
@@ -304,19 +321,26 @@ pub fn dispatch() -> Result<()> {
             "get_community_tool",
             serde_json::json!({"community_id":id,"community_name":name,"include_members":members}),
         ),
-        Command::Serve { repo, tools } => mcp::serve(&root(repo.as_deref(), false)?, tools),
-        Command::Visualize {
-            location,
-            mode,
-            format,
-            sidecar,
+        Command::Watch(options) => watch::foreground(options),
+        Command::Serve {
+            repo,
+            tools,
+            auto_watch,
+            http,
+            multi_worktree,
+        } => http.run(repo.as_deref(), tools, auto_watch, multi_worktree),
+        Command::Mcp {
+            repo,
+            auto_watch,
+            multi_worktree,
         } => {
-            let root = root(location.repo.as_deref(), false)?;
-            let db = store::database(&root, location.data_dir.as_deref());
-            let conn = store::open(&db)?;
-            store::check_root(&conn, &db, &root)?;
-            visualize::write(&conn, &db, &format, &mode, sidecar)
+            if multi_worktree {
+                return mcp::worktree::serve("mcp", repo.as_deref(), None, auto_watch);
+            }
+            let root = root(repo.as_deref(), false)?;
+            watch::with_auto(&root, auto_watch, || mcp::serve(&root, None))
         }
+        Command::Visualize(options) => visualize::run(options),
         Command::Wiki { location, force } => {
             let root = root(location.repo.as_deref(), false)?;
             let db = store::database(&root, location.data_dir.as_deref());
@@ -423,8 +447,14 @@ pub fn dispatch() -> Result<()> {
                 .embedding_provider
                 .as_deref()
                 .zip(args.embedding_model.as_deref());
-            let report = match canonical::index_with_embeddings(
-                &root, &db, full, level, args.wait, refresh,
+            let report = match canonical::index_sources(
+                &root,
+                &db,
+                full,
+                level,
+                args.wait,
+                refresh,
+                canonical::Sources::Repository(args.links.explicit()),
             ) {
                 Err(error)
                     if error
@@ -473,6 +503,17 @@ pub fn dispatch() -> Result<()> {
                         eprintln!("INFO: Progress: {total}/{total} files parsed");
                     }
                 }
+                let enrich = std::env::var("CRG_DISABLE_ENRICHMENT").as_deref() != Ok("1")
+                    && (args.enrich
+                        || std::env::var("CRG_ENABLE_ENRICHMENT").as_deref() == Ok("1"));
+                let reparsed_python = report
+                    .changed_files
+                    .iter()
+                    .chain(&report.dependent_files)
+                    .any(|f| f.ends_with(".py") && root.join(f).is_file());
+                if enrich && (report.full || reparsed_python) {
+                    eprintln!("INFO: Jedi not installed, skipping Python enrichment");
+                }
                 match report.postprocess.fts_delta {
                     Some((removed, added)) if removed + added > 0 => eprintln!(
                         "INFO: FTS index delta: {removed} entries removed, {added} indexed"
@@ -515,17 +556,7 @@ pub fn dispatch() -> Result<()> {
                 } else {
                     println!(
                         "Incremental: {} files updated, {} nodes, {} edges (postprocess={postprocess})",
-                        report.files_parsed,
-                        if report.files_parsed == 0 && report.files_deleted == 0 {
-                            0
-                        } else {
-                            report.nodes
-                        },
-                        if report.files_parsed == 0 && report.files_deleted == 0 {
-                            0
-                        } else {
-                            report.edges
-                        }
+                        report.files_parsed, report.updated_nodes, report.updated_edges
                     );
                 }
             }

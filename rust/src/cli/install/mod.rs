@@ -1,4 +1,5 @@
 mod config;
+mod ignore_block;
 mod plan;
 use super::changes;
 use anyhow::{Context, Result, ensure};
@@ -33,6 +34,12 @@ pub(super) struct Options {
     no_skills: bool,
     #[arg(long)]
     no_instructions: bool,
+    #[arg(long, overrides_with = "no_steering")]
+    steering: bool,
+    #[arg(long, overrides_with = "steering")]
+    no_steering: bool,
+    #[arg(long)]
+    gitignore: bool,
     #[arg(short = 'y', long)]
     yes: bool,
     #[arg(long, hide = true)]
@@ -328,6 +335,51 @@ pub(super) fn run(opts: Options) -> Result<()> {
         }
         git_hooks(&mut plan, &root, &binary)?;
     }
+    if opts.steering || opts.no_steering {
+        let prefix = if opts.dry_run { "[dry-run] " } else { "" };
+        if !matches!(opts.platform.as_str(), "all" | "claude" | "claude-code") {
+            println!("{prefix}Skipped the steering hook: it is only for Claude Code.");
+        } else if opts.steering && opts.no_hooks {
+            println!("{prefix}Skipped the steering hook: --no-hooks was given.");
+        } else {
+            let path = ".claude/settings.json";
+            let mut changed = false;
+            plan.edit(&root, path, path.into(), false, |old| {
+                let settings = if opts.steering {
+                    config::hooks(old, asset!("claude/steering.json"), &binary)?
+                } else {
+                    config::without_steering(old, asset!("claude/steering.json"))?
+                };
+                changed = settings != old;
+                Ok(settings)
+            })?;
+            if opts.no_steering {
+                println!(
+                    "{prefix}{}",
+                    if !changed {
+                        "No steering hook to remove."
+                    } else if opts.dry_run {
+                        "Would remove the steering hook."
+                    } else {
+                        "Removed the steering hook."
+                    }
+                );
+            } else if changed {
+                let file = root.join(path);
+                if opts.dry_run {
+                    println!(
+                        "[dry-run] Would add the steering hook to {}.",
+                        file.display()
+                    );
+                } else {
+                    println!(
+                        "Installed the steering hook in {}. Remove it with --no-steering.",
+                        file.display()
+                    );
+                }
+            }
+        }
+    }
     if !opts.no_instructions
         && (opts.dry_run
             || opts.yes
@@ -369,6 +421,9 @@ pub(super) fn run(opts: Options) -> Result<()> {
                 serde_json::to_string_pretty(&json!({"version":1,"files":files}))?
             ))
         })?;
+    }
+    if opts.gitignore {
+        ignore_block::apply(&mut plan, &root, opts.dry_run)?;
     }
     if opts.dry_run {
         plan.print();

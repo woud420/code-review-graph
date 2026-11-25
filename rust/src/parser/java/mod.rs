@@ -42,6 +42,7 @@ fn qualified(class: &str, name: &str) -> String {
 }
 
 struct Input<'s> {
+    test_file: bool,
     source: &'s str,
     file: ParsedFile,
     package: String,
@@ -49,8 +50,9 @@ struct Input<'s> {
     fields: HashMap<(String, String), String>,
 }
 
-pub fn extract(n: Node<'_>, s: &str) -> ParsedFile {
+pub fn extract(n: Node<'_>, s: &str, test_file: bool) -> ParsedFile {
     let mut input = Input {
+        test_file,
         source: s,
         file: Default::default(),
         package: String::new(),

@@ -19,11 +19,11 @@ pub fn project_root(path: &Path) -> Option<PathBuf> {
 
 pub fn database(root: &Path, data_dir: Option<&Path>) -> PathBuf {
     data_dir
-        .and_then(|p| super::absolute(p).ok())
+        .and_then(|p| crate::cli::absolute(p).ok())
         .or_else(|| {
-            let entries=super::registry::list().ok()?;
+            let entries=crate::cli::registry::list().ok()?;
             let entry=entries.iter().find(|v| v["path"].as_str()==root.to_str())?;
-            let dir=super::absolute(Path::new(entry["data_dir"].as_str()?)).ok()?;
+            let dir=crate::cli::absolute(Path::new(entry["data_dir"].as_str()?)).ok()?;
             if !dir.exists() && root.join(".code-review-graph/graph.db").is_file() {
                 eprintln!("WARNING: Registered graph directory {} is missing; falling back to normal resolution (local graph: {}).",dir.display(),root.join(".code-review-graph").display());
                 None
@@ -44,8 +44,10 @@ pub fn open(db: &Path) -> Result<Connection> {
         "No graph found at {}. Run `code-review-graph build` first.",
         db.display()
     );
+    code_review_graph_rs::canonical::database::permissions(db)?;
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.execute_batch("BEGIN DEFERRED")?;
+    code_review_graph_rs::canonical::database::validate(&conn, db)?;
     Ok(conn)
 }
 
@@ -141,7 +143,7 @@ pub fn status(root: &Path, conn: &Connection, output_json: bool, quiet: bool) ->
         let data = json!({"nodes":stats.nodes(), "edges":stats.edges(), "files":stats.files(), "languages":stats.languages,
             "last_updated":stats.updated, "vcs":vcs, "built_on_branch":built_branch, "built_at_commit":built_sha, "current_branch":branch,
             "current_sha":sha, "svn_branch":svn_branch, "svn_revision":svn_rev, "build_incomplete":incomplete});
-        println!("{}", super::wire::json_text(&data, false));
+        println!("{}", crate::cli::wire::json_text(&data, false));
     } else if !quiet {
         println!(
             "Nodes: {}\nEdges: {}\nFiles: {}\nLanguages: {}\nLast updated: {}",
@@ -230,7 +232,7 @@ pub fn tool_stats(conn: &Connection, root: &Path) -> Result<Value> {
     )
 }
 
-pub(super) fn embedding_count(conn: &Connection) -> Result<i64> {
+pub(in crate::cli) fn embedding_count(conn: &Connection) -> Result<i64> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='embeddings')",
         [],

@@ -17,11 +17,28 @@ pub(super) fn git_timed(
     setting: &str,
     default: f64,
 ) -> Result<(bool, Vec<u8>)> {
-    let seconds = std::env::var(setting)
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|s| s.is_finite() && *s > 0.)
-        .unwrap_or(default);
+    let configured = |key| {
+        std::env::var(key)
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|s| s.is_finite() && *s >= 0.)
+    };
+    let (seconds, knob) = if setting == "CRG_DISCOVERY_TIMEOUT"
+        && configured(setting).is_none()
+        && configured("CRG_GIT_TIMEOUT").is_some()
+    {
+        (
+            configured("CRG_GIT_TIMEOUT").unwrap_or(default),
+            "CRG_GIT_TIMEOUT",
+        )
+    } else {
+        (configured(setting).unwrap_or(default), setting)
+    };
+    if seconds == 0. {
+        bail!(
+            "could not determine the changes: git timed out after 0s. Raise {knob}, or re-run when the repository is not busy."
+        );
+    }
     let mut child=Command::new("git").current_dir(root).args(args).stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().context("could not determine the changes: git could not be run. Install git and make sure it is on PATH.")?;
     let mut stdout = child.stdout.take().context("git output unavailable")?;
     let read = std::thread::spawn(move || {
@@ -40,7 +57,7 @@ pub(super) fn git_timed(
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "could not determine the changes: git timed out after {seconds}s. Raise CRG_DISCOVERY_TIMEOUT, or re-run when the repository is not busy."
+                "could not determine the changes: git timed out after {seconds}s. Raise {knob}, or re-run when the repository is not busy."
             );
         }
         std::thread::sleep(Duration::from_millis(5));

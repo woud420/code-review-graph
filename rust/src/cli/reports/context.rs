@@ -26,6 +26,10 @@ fn holds_commits(conn: &Connection, root: &Path, built: &str) -> Result<bool> {
     ) else {
         return Ok(false);
     };
+    holds_paths(conn, root, &raw)
+}
+
+pub(in crate::cli) fn holds_paths(conn: &Connection, root: &Path, raw: &[u8]) -> Result<bool> {
     let paths: Vec<_> = raw.split(|b| *b == 0).filter(|s| !s.is_empty()).collect();
     if paths.len() > 200 {
         return Ok(false);
@@ -40,6 +44,14 @@ fn holds_commits(conn: &Connection, root: &Path, built: &str) -> Result<bool> {
             )
             .optional()?
             .flatten();
+        if let Ok(meta) = path.symlink_metadata()
+            && (!meta.is_file() || meta.len() > 64 * 1024 * 1024)
+        {
+            if hash.is_some() {
+                return Ok(false);
+            }
+            continue;
+        }
         if let Some(hash) = hash {
             let Ok(bytes) = std::fs::read(&path) else {
                 return Ok(false);

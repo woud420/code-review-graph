@@ -145,6 +145,14 @@ impl Input<'_> {
                 .find(|sym| sym.name.rsplit('.').next() == Some(method))
                 .map(|sym| sym.name.clone());
         }
+        if self.test_file && target.is_none() && obj.is_some() && !reference {
+            if receiver.is_none() {
+                extra["receiver_form"] = json!("expression");
+            }
+            if extra.get("receiver_type").is_none() {
+                extra["receiver_binding"] = json!("unknown");
+            }
+        }
         let raw = receiver.map_or_else(|| method.to_owned(), |r| format!("{r}.{method}"));
         let line = n.start_position().row + 1;
         self.file.calls.push(Call {

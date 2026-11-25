@@ -1,8 +1,12 @@
 mod data;
 mod export;
 mod group;
+mod neighbourhood;
+mod options;
+mod serve;
 use super::{query::text, wire};
 use anyhow::Result;
+pub(super) use options::Options;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::{collections::HashMap, fmt::Write as _, fs, path::Path};
@@ -83,20 +87,35 @@ fn save(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn write(
-    conn: &Connection,
-    db: &Path,
-    format: &str,
-    mode: &str,
-    sidecar: bool,
-) -> Result<()> {
-    if format != "html" && sidecar {
-        eprintln!(
-            "visualize: {} has no effect on --format {format}",
-            if sidecar { "--sidecar" } else { "--mode" }
-        );
+pub(super) fn run(opt: Options) -> Result<()> {
+    if let Err(error) = opt.flags() {
+        let help: serde_json::Value =
+            serde_json::from_str(include_str!("../../../assets/cli/help.json"))?;
+        let usage = help["visualize"]
+            .as_str()
+            .unwrap()
+            .split("\n\n")
+            .next()
+            .unwrap();
+        eprintln!("{usage}\ncode-review-graph visualize: error: {error}");
         std::process::exit(2);
     }
+    let (root, db) = opt.database()?;
+    let conn = super::store::open(&db)?;
+    super::store::check_root(&conn, &db, &root)?;
+    if opt.format == "svg" {
+        anyhow::bail!(
+            "Error: SVG export requires matplotlib. Run: pip install \"code-review-graph[eval]\""
+        );
+    }
+    let Some(patterns) = opt.paths(&root)? else {
+        return Ok(());
+    };
+    write(&conn, &db, &opt, &patterns)
+}
+
+fn write(conn: &Connection, db: &Path, opt: &Options, patterns: &[String]) -> Result<()> {
+    let (format, mode, sidecar) = (opt.format.as_str(), opt.mode.as_str(), opt.sidecar);
     let path = db.with_file_name(format!("graph.{format}"));
     let mut data = data::read(conn)?;
     if format == "obsidian" {
@@ -129,9 +148,23 @@ pub(super) fn write(
         println!("{label} exported: {}", path.display());
         return Ok(());
     }
+    if opt.seeded() {
+        let selection = opt
+            .validate_depth()
+            .and_then(|_| neighbourhood::extract(&data, opt, patterns));
+        data = match selection {
+            Ok(payload) => payload,
+            Err(error) => {
+                eprintln!("visualize: {error}");
+                std::process::exit(2)
+            }
+        };
+    }
     let nodes = data["nodes"].as_array().unwrap();
     let edges = data["edges"].as_array().unwrap();
-    let effective = if mode != "auto" {
+    let effective = if opt.seeded() {
+        "full"
+    } else if mode != "auto" {
         mode
     } else if nodes.len() <= 3000 && edges.len() <= 9000 {
         "full"
@@ -155,18 +188,18 @@ pub(super) fn write(
         data = group::aggregate(&data, effective);
         include_str!("../../../assets/visualization/aggregated.html")
     };
-    let data = wire::json_text(&data, false).replace("</", "<\\/");
+    let json_data = wire::json_text(&data, false).replace("</", "<\\/");
     let (script, payload) = if sidecar {
         save(
             &db.with_file_name("graph.data.js"),
-            format!("window.__CRG_GRAPH_DATA__ = {data};\n").as_bytes(),
+            format!("window.__CRG_GRAPH_DATA__ = {json_data};\n").as_bytes(),
         )?;
         (
             "<script src=\"graph.data.js\"></script>",
             "window.__CRG_GRAPH_DATA__",
         )
     } else {
-        ("", data.as_str())
+        ("", json_data.as_str())
     };
     let html = template
         .replace("__SIDECAR_SCRIPT__", script)
@@ -177,12 +210,16 @@ pub(super) fn write(
         save(&library, expected)?;
     }
     save(&path, html.as_bytes())?;
-    println!("Visualisation ({mode}): {}", path.display());
+    println!("Visualisation ({}): {}", opt.label(), path.display());
+    options::print_budget(&data);
     if sidecar {
         println!(
             "Payload sidecar: {}",
             db.with_file_name("graph.data.js").display()
         );
+    }
+    if opt.serve {
+        return serve::run(path.parent().unwrap());
     }
     println!("Open in browser to explore.");
     Ok(())

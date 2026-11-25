@@ -1,3 +1,4 @@
+use super::index::location::{FollowSymlinks, Location};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -17,15 +18,11 @@ pub struct Cli {
 }
 
 #[derive(Args)]
-pub struct Location {
-    #[arg(long)]
-    pub repo: Option<PathBuf>,
-    #[arg(long)]
-    pub data_dir: Option<PathBuf>,
-}
-
-#[derive(Args)]
 pub struct Write {
+    #[command(flatten)]
+    pub links: FollowSymlinks,
+    #[arg(long)]
+    pub enrich: bool,
     #[arg(long,value_parser=["local","openai","google","minimax","voyage"])]
     pub embedding_provider: Option<String>,
     #[arg(long)]
@@ -99,6 +96,13 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Diagnose the graph, installed copies and hooks.
+    Doctor {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show graph statistics.
     Status {
         #[command(flatten)]
@@ -118,16 +122,7 @@ pub enum Command {
         to: Option<String>,
     },
     /// Export a graph visualization.
-    Visualize {
-        #[command(flatten)]
-        location: Location,
-        #[arg(long,default_value="auto",value_parser=["auto","full","community","file"])]
-        mode: String,
-        #[arg(long,default_value="html",value_parser=["html","json","graphml","cypher","obsidian"])]
-        format: String,
-        #[arg(long)]
-        sidecar: bool,
-    },
+    Visualize(super::visualize::Options),
     /// Generate Markdown pages for graph communities.
     Wiki {
         #[command(flatten)]
@@ -306,13 +301,29 @@ pub enum Command {
         #[arg(long)]
         members: bool,
     },
-    /// Run the local MCP server over stdio.
-    #[command(visible_alias = "mcp")]
+    /// Watch for changes and auto-update.
+    Watch(super::watch::Options),
+    /// Run the MCP server over stdio or HTTP.
     Serve {
+        #[command(flatten)]
+        http: super::mcp::http::Options,
+        #[arg(long)]
+        auto_watch: bool,
+        #[arg(long)]
+        multi_worktree: bool,
         #[arg(long)]
         repo: Option<PathBuf>,
         #[arg(long)]
         tools: Option<String>,
+    },
+    /// Alias for the stdio MCP server.
+    Mcp {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        auto_watch: bool,
+        #[arg(long)]
+        multi_worktree: bool,
     },
 }
 
@@ -324,6 +335,7 @@ pub fn parse() -> Cli {
         Err(error) => {
             let context = |key| error.get(key).map(ToString::to_string).unwrap_or_default();
             match error.kind() {
+                ErrorKind::DisplayVersion => error.exit(),
                 ErrorKind::DisplayHelp => {
                     // Keep the documented argparse layout for the commands that accept the same options.
                     let pages: std::collections::BTreeMap<String, String> =
@@ -332,12 +344,28 @@ pub fn parse() -> Cli {
                     if let Some(page) = argv
                         .get(1)
                         .and_then(|s| s.to_str())
-                        .and_then(|cmd| pages.get(cmd))
+                        .and_then(|cmd| pages.get(if cmd == "-h" { "--help" } else { cmd }))
                     {
                         print!("{page}");
                         std::process::exit(0);
                     }
-                    error.exit();
+                    let mut help = error.render().to_string().replace("Usage:", "usage:");
+                    if argv.get(1).is_some_and(|v| v == "init") {
+                        help = help.replace(
+                            "usage: code-review-graph install",
+                            "usage: code-review-graph init",
+                        );
+                    }
+                    print!("{help}");
+                    std::process::exit(0);
+                }
+                ErrorKind::UnknownArgument if context(ContextKind::InvalidArg).starts_with('-') => {
+                    let flag = context(ContextKind::InvalidArg);
+                    // argparse reports the extra arguments at the root parser.
+                    // A suggestion is advisory in clap, so keep the actual token.
+                    eprintln!(
+                        "usage: code-review-graph [-h] [-v] <command> ...\ncode-review-graph: error: unrecognized arguments: {flag}"
+                    );
                 }
                 ErrorKind::InvalidSubcommand => {
                     let word = context(ContextKind::InvalidSubcommand);
@@ -362,7 +390,23 @@ pub fn parse() -> Cli {
                         "usage: code-review-graph query [-h] [--to TO] [--repo REPO] pattern target\ncode-review-graph query: error: the following arguments are required: {fields}"
                     );
                 }
-                _ => error.exit(),
+                ErrorKind::InvalidValue => {
+                    use clap::CommandFactory;
+                    let mut root = Cli::command();
+                    root.build();
+                    let usage = argv
+                        .get(1)
+                        .and_then(|s| s.to_str())
+                        .and_then(|name| root.find_subcommand_mut(name))
+                        .map(|cmd| cmd.render_usage().to_string())
+                        .unwrap_or_else(|| root.render_usage().to_string());
+                    eprintln!("{}", usage.replace("Usage:", "usage:"));
+                    eprint!("{error}");
+                }
+                _ => {
+                    eprint!("{}", error.render().to_string().replace("Usage:", "usage:"));
+                    std::process::exit(error.exit_code());
+                }
             }
             std::process::exit(2);
         }

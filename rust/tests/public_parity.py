@@ -109,6 +109,7 @@ def lifecycle(command, repo, env):
     probe("short-version", "-v")
     probe("unknown-command", "querry")
     probe("status/missing", "status", "--json", *common)
+    probe("watch/missing-graph", "watch", *common)
     probe("query/unbuilt", "query", "callers_of", "target", *common)
     probe("build/no-postprocess", "build", "--skip-postprocess", *common)
     probe("query/callers", "query", "callers_of", "target", *common)
@@ -383,8 +384,39 @@ def capture(args, temp):
     result.inventory["mcp"] = {"reference": inventory, "candidate": candidate_inventory}
     cases = QUERY_CASES | REVIEW_CASES if args.cutover else QUERY_CASES
     untested_tools = sorted(set(inventory["tools"]) - {name for name, _ in cases.values()})
-    tested_commands = {"build", "query", "update", "status", "search", "serve"}
+    tested_commands = {"build", "query", "update", "status", "search", "serve", "watch"}
     if args.cutover:
+        # Compare an actual read-only doctor invocation on the saved Python graph.
+        # This_copy identifies the Python package or the running native executable.
+        doctor_path = temp / "doctor-path"
+        doctor_path.mkdir()
+        (doctor_path / "git").symlink_to(shutil.which("git"))
+        def doctor_output(command, environment, runtime):
+            report = run(command + ["doctor", "--repo", str(repo), "--json"], repo,
+                         dict(environment, PATH=str(doctor_path)))
+            if report["exit"] != 1:
+                if runtime == "python":
+                    raise RuntimeError(f"expected doctor to flag the missing postprocessing: {report}")
+                return report
+            value = json.loads(report["stdout"])
+            assert value["healthy"] is False and value["graph"]["files"] > 0 and value["graph"]["stale"] is False
+            assert value["graph"]["build_state"] == "postprocess-pending"
+            copy = value["this_copy"]
+            if runtime == "python":
+                assert Path(copy["python"]).samefile(shutil.which(args.python) or args.python)
+                location = str(source / "code_review_graph")
+                assert copy["package"] == location
+            else:
+                location = candidate[0]
+                assert copy["executable"] == location
+            assert value["checks"][0]["message"] == f"This copy: 2.4.0 at {location}."
+            value["this_copy"] = {"version": copy["version"]}
+            value["checks"][0]["message"] = "This copy: 2.4.0 at <verified runtime>."
+            return dict(report, stdout=json.dumps(value, indent=2) + "\n")
+        result.check("doctor/pending-postprocess", doctor_output(reference, env, "python"),
+                     doctor_output(candidate, candidate_env, "native"), cli=True)
+        if result.checks["doctor/pending-postprocess"]["match"]:
+            tested_commands.add("doctor")
         tested_commands.update(argv[0] for argv in REVIEW_COMMANDS.values())
         tested_commands.update({"eval","install","init","uninstall","embed","enrich","hook-status","hook-update"})
     daemon_paths = {p.removeprefix("daemon ") for p in tree if p.startswith("daemon ")}

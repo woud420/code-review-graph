@@ -251,6 +251,21 @@ impl<'a> CallEvidence<'a> {
         let method = raw.rsplit('.').next().unwrap_or(raw);
         if let Some(site) = self.facts.syntax.site(caller, raw, line) {
             let mut extra = site.extra.clone();
+            if self.source.language == "scala" && bound.is_none() && site.target.is_none() {
+                let prefix = format!("{raw}:S");
+                let path = self.root.join(self.file).to_string_lossy().into_owned();
+                let identities: Vec<_> = self
+                    .facts
+                    .symbols
+                    .iter()
+                    .filter(|s| s.name == raw || s.name.starts_with(&prefix))
+                    .map(|s| qualified(&path, &s.name))
+                    .collect();
+                if identities.len() > 1 {
+                    return json!({"ambiguous_targets":identities.iter().take(20).collect::<Vec<_>>(),"ambiguous_target_count":identities.len(),"ambiguous_targets_truncated":identities.len()>20,"collision_endpoint":qualified(&path,raw),"confidence":0.4,"confidence_tier":"AMBIGUOUS"});
+                }
+            }
+
             if self.source.language == "php"
                 && site.target.is_none()
                 && let Some((bound_file, _)) = bound
@@ -287,7 +302,10 @@ impl<'a> CallEvidence<'a> {
                 &self.root.join(self.file).to_string_lossy(),
             );
         }
-        if matches!(self.source.language, "javascript" | "typescript" | "tsx") {
+        if matches!(
+            self.source.language,
+            "javascript" | "typescript" | "tsx" | "vue" | "html"
+        ) {
             let extra = self
                 .facts
                 .typescript

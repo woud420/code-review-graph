@@ -32,6 +32,9 @@ pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
     {
         return extensions::parse(language, path, source);
     }
+    if extensions::notebook::export(path, source) {
+        return extensions::parse("notebook", path, source);
+    }
     let grammar = match path.extension().and_then(|ext| ext.to_str()) {
         Some("rb") => return ruby::parse(path, source),
         Some("tf" | "hcl") => return hcl::parse(source),
@@ -77,7 +80,11 @@ pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
         return Ok(csharp::extract(tree.root_node(), source));
     }
     if path.extension().is_some_and(|e| e == "java") {
-        return Ok(java::extract(tree.root_node(), source));
+        return Ok(java::extract(
+            tree.root_node(),
+            source,
+            crate::model::test_file(&path.to_string_lossy(), None),
+        ));
     }
     if path.extension().is_some_and(|e| e == "go") {
         return Ok(crate::parser::go::extract(path, tree.root_node(), source));

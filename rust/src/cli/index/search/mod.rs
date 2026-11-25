@@ -135,7 +135,7 @@ fn expressions(query: &str) -> Vec<String> {
 
 type Ranked = Vec<(i64, f64)>;
 
-pub(super) fn fts(
+pub(in crate::cli) fn fts(
     conn: &Connection,
     query: &str,
     kind: Option<&str>,
@@ -360,7 +360,7 @@ impl<'a> Boost<'a> {
     }
 }
 
-pub(super) fn ranked(
+pub(in crate::cli) fn ranked(
     conn: &Connection,
     root: &Path,
     options: &Options,
@@ -369,7 +369,7 @@ pub(super) fn ranked(
     let (mode, rows) = ranked_with_ids(conn, root, options, window)?;
     Ok((mode, rows.into_iter().map(|(_, node)| node).collect()))
 }
-pub(super) fn ranked_with_ids(
+pub(in crate::cli) fn ranked_with_ids(
     conn: &Connection,
     root: &Path,
     options: &Options,

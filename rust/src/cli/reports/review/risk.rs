@@ -157,13 +157,25 @@ pub(in crate::cli::reports) fn caller_route(
     let start = text(node, "qualified_name").to_owned();
     let mut seen = HashSet::from([start.clone()]);
     let mut frontier = vec![(start, String::new())];
-    let cap = std::env::var("CRG_CALLER_TEST_ROUTE_MAX_CALLERS")
-        .ok()
-        .and_then(|n| n.parse::<i64>().ok())
-        .unwrap_or(500);
+    static LIMITS: std::sync::LazyLock<(i64, i64)> = std::sync::LazyLock::new(|| {
+        fn setting(name: &str, fallback: i64) -> i64 {
+            let Ok(value) = std::env::var(name) else {
+                return fallback;
+            };
+            value.trim().parse().unwrap_or_else(|_| {
+                eprintln!("WARNING: Ignoring invalid {name}='{}' (not a number); using the default {fallback}.", value.escape_default());
+                fallback
+            })
+        }
+        (
+            setting("CRG_CALLER_TEST_ROUTE_DEPTH", 2),
+            setting("CRG_CALLER_TEST_ROUTE_MAX_CALLERS", 500),
+        )
+    });
+    let (depth_limit, cap) = *LIMITS;
     let mut incoming=conn.prepare("SELECT DISTINCT n.* FROM edges e JOIN nodes n ON n.qualified_name=e.source_qualified WHERE e.target_qualified=?1 AND e.kind='CALLS' AND instr(e.source_qualified,'::')>0 AND json_type(e.extra,'$.unresolved_targets') IS NULL AND json_type(e.extra,'$.ambiguous_targets') IS NULL ORDER BY n.qualified_name")?;
     let mut tests=conn.prepare("SELECT target_qualified FROM edges WHERE kind='TESTED_BY' AND source_qualified=?1 AND json_type(extra,'$.unresolved_targets') IS NULL AND json_type(extra,'$.ambiguous_targets') IS NULL LIMIT 1")?;
-    for depth in 1..=2 {
+    for depth in 1..=depth_limit.max(0) as usize {
         let mut next = Vec::new();
         for (qn, via) in frontier {
             let count: i64 = conn.query_row(
@@ -203,6 +215,9 @@ pub(in crate::cli::reports) fn caller_route(
                     if via.is_empty() { name } else { via.clone() },
                 ));
             }
+        }
+        if next.is_empty() {
+            break;
         }
         frontier = next;
     }

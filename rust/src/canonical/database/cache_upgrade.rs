@@ -1,4 +1,4 @@
-use super::{INDEX_VERSION, index, postprocess::Level};
+use crate::canonical::{INDEX_VERSION, index, postprocess::Level};
 use crate::graph::Graph;
 use anyhow::Result;
 use rusqlite::Connection;
@@ -31,7 +31,7 @@ fn upgrade_rebuilds_matching_hashes_and_retries_after_a_parse_failure() -> Resul
         fs::write(&source, b"\xff")?;
         assert!(index(&root, &db, false, Level::Full, false).is_err());
         assert_eq!(
-            super::metadata(&canonical, "rust_index_version")?.as_deref(),
+            crate::canonical::metadata(&canonical, "rust_index_version")?.as_deref(),
             Some("1")
         );
         assert_eq!(
@@ -42,7 +42,7 @@ fn upgrade_rebuilds_matching_hashes_and_retries_after_a_parse_failure() -> Resul
         fs::write(&source, program)?;
         assert!(index(&root, &db, false, Level::Full, false)?.full);
         assert_eq!(
-            super::metadata(&canonical, "rust_index_version")?.as_deref(),
+            crate::canonical::metadata(&canonical, "rust_index_version")?.as_deref(),
             Some(INDEX_VERSION)
         );
         assert_eq!(

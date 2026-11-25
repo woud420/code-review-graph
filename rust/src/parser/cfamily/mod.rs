@@ -11,7 +11,7 @@ use std::{borrow::Cow, collections::HashSet, path::Path};
 use tree_sitter::{Node, Parser};
 
 pub(crate) fn supports(ext: &str) -> bool {
-    matches!(ext, "h" | "c" | "cpp" | "cc" | "cxx" | "hh" | "hpp")
+    matches!(ext, "h" | "c" | "xs" | "cpp" | "cc" | "cxx" | "hh" | "hpp")
 }
 
 fn text<'s>(n: Node<'_>, s: &'s str) -> &'s str {
@@ -77,12 +77,13 @@ fn tree(s: &str, cpp: bool) -> Result<tree_sitter::Tree> {
 
 pub fn parse(path: &Path, source: &str) -> Result<ParsedFile> {
     let ext = path.extension().and_then(|v| v.to_str()).unwrap_or("");
-    let masked = if ext == "c" {
+    let is_c = matches!(ext, "c" | "xs");
+    let masked = if is_c {
         Cow::Borrowed(source)
     } else {
         header::qt(source)
     };
-    let mut cpp = ext != "c" && (ext != "h" || header::potential(&masked));
+    let mut cpp = !is_c && (ext != "h" || header::potential(&masked));
     let mut syntax = tree(&masked, cpp)?;
     if ext == "h" && cpp && !header::cpp_tree(syntax.root_node(), &masked) {
         cpp = false;

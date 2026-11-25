@@ -316,3 +316,7 @@ fn status(home: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn watch_health_path(repo: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    Ok(lifecycle::health_file(&config::home()?, repo))
+}

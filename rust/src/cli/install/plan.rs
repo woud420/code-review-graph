@@ -50,6 +50,16 @@ impl Plan {
         render: impl FnOnce(&str) -> Result<String>,
     ) -> Result<()> {
         let path = base.join(relative);
+        if let Some(index) = self.0.iter().position(|c| c.path == path) {
+            let change = &mut self.0[index];
+            let after = render(change.after.as_deref().unwrap_or(""))?;
+            if change.before.as_deref().unwrap_or("") == after {
+                self.0.remove(index);
+            } else {
+                change.after = Some(after);
+            }
+            return Ok(());
+        }
         let before = read(base, Path::new(relative))?;
         let after = render(before.as_deref().unwrap_or(""))?;
         if before.as_deref().unwrap_or("") != after {

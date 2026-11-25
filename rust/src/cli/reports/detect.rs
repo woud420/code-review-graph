@@ -262,7 +262,16 @@ pub(in crate::cli) fn print(
     verify: bool,
     details: Option<&str>,
 ) -> Result<()> {
-    let files = changes::discover(root, base)?;
+    if !root
+        .ancestors()
+        .any(|d| d.join(".git").exists() || d.join(".svn").exists())
+    {
+        anyhow::bail!(
+            "Error: could not determine the changes: {} is not a git repository.",
+            root.display()
+        );
+    }
+    let files = changes::discover(root, base).map_err(|e| anyhow::anyhow!("Error: {e}"))?;
     let requested = base;
     let base = changes::resolve_base(root, requested)?;
     if requested == "HEAD~1" && base != requested {

@@ -15,6 +15,19 @@ struct Statement {
 }
 
 impl ImportDetails {
+    pub(super) fn unscoped(line: usize) -> Self {
+        Self {
+            statements: BTreeMap::from([(
+                line,
+                Statement {
+                    module: None,
+                    imported: Vec::new(),
+                    context: None,
+                },
+            )]),
+        }
+    }
+
     pub(super) fn observe(&mut self, node: Node<'_>, source: &str, language: &str) {
         if language != "python"
             || !matches!(node.kind(), "import_statement" | "import_from_statement")
@@ -159,6 +172,11 @@ pub(super) fn import_target(
     let parent = Path::new(file).parent()?;
     let mut candidates = Vec::new();
     if language == "python" {
+        if !module.starts_with('.') {
+            return crate::model::python_modules::absolute_module(file, module, |p| {
+                paths.contains(p)
+            });
+        }
         let module_name = module.trim_start_matches('.');
         let depth = module.len() - module_name.len();
         let mut dir = if depth == 0 {

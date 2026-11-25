@@ -1,11 +1,12 @@
-use super::{store, wire};
+use super::store;
+use crate::cli::wire;
 use anyhow::{Result, ensure};
 use code_review_graph_rs::canonical::{self, postprocess::Level};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::path::Path;
 
-pub(super) fn contended(db_path: &Path, outcome: &str) -> Value {
+pub(in crate::cli) fn contended(db_path: &Path, outcome: &str) -> Value {
     let lock = db_path.with_file_name("write.lock");
     let pid = std::fs::read_to_string(&lock)
         .ok()
@@ -85,8 +86,8 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
     let mut report = if result.full {
         json!({"files_parsed":result.files_parsed,"stale_files_removed":result.files_deleted,"total_nodes":result.nodes,"total_edges":result.edges,"errors":[]})
     } else {
-        let mut value = json!({"files_updated":result.files_parsed,"total_nodes":if no_change {0} else {result.nodes},
-            "total_edges":if no_change {0} else {result.edges},"changed_files":result.changed_files,"dependent_files":result.dependent_files,"stale_files_removed":result.files_deleted});
+        let mut value = json!({"files_updated":result.files_parsed,"total_nodes":result.updated_nodes,
+            "total_edges":result.updated_edges,"changed_files":result.changed_files,"dependent_files":result.dependent_files,"stale_files_removed":result.files_deleted});
         if no_change {
             value["flow_entry_point_qns"] = json!([]);
         }
@@ -120,7 +121,7 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
     } else if no_change && result.base.is_some() {"No changes detected. Graph is up to date.".into()}
     else if no_change {"No graph changes detected. Freshness metadata was not advanced.".into()}
     else {format!("Incremental update: {} files re-parsed, {} nodes and {} edges updated. Changed: {}. Dependents also updated: {}.",
-        result.files_parsed,result.nodes,result.edges,wire::value_repr(&report["changed_files"]),wire::value_repr(&report["dependent_files"]))}.into();
+        result.files_parsed,result.updated_nodes,result.updated_edges,wire::value_repr(&report["changed_files"]),wire::value_repr(&report["dependent_files"]))}.into();
     report["postprocess_level"] = match result.effective_level {
         Level::None => "none",
         Level::Minimal => "minimal",
@@ -161,7 +162,7 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
 const ABSENT_EMBEDDINGS: &str = "Embedding refresh skipped: this graph has no embeddings yet. Run `code-review-graph embed` (MCP: embed_graph_tool) once with the same provider and model to create them.";
 const INCOMPLETE: &str = "The last build stopped before every file was stored, so the graph is still incomplete. Post-processing rebuilt what it could from the stored nodes; run 'code-review-graph build' to finish the graph itself.";
 
-pub(super) fn postprocess(
+pub(in crate::cli) fn postprocess(
     root: &Path,
     db: &Path,
     args: &Value,
@@ -223,7 +224,12 @@ pub(super) fn postprocess(
     Ok(report)
 }
 
-pub(super) fn postprocess_cli(root: &Path, db: &Path, args: &Value, wait: bool) -> Result<()> {
+pub(in crate::cli) fn postprocess_cli(
+    root: &Path,
+    db: &Path,
+    args: &Value,
+    wait: bool,
+) -> Result<()> {
     let report = postprocess(root, db, args, wait, true)?;
     if report["status"] == "contended" {
         eprintln!(
@@ -258,7 +264,7 @@ pub(super) fn postprocess_cli(root: &Path, db: &Path, args: &Value, wait: bool) 
     Ok(())
 }
 
-pub(super) fn forget_cli(
+pub(in crate::cli) fn forget_cli(
     root: &Path,
     path: &Path,
     patterns: &[String],
@@ -362,7 +368,7 @@ fn refresh_request(args: &Value) -> Option<(&str, &str)> {
         .as_str()
         .zip(args["embedding_model"].as_str())
 }
-pub(super) fn refresh_result(
+pub(in crate::cli) fn refresh_result(
     report: &mut Value,
     outcome: &canonical::embeddings::Refresh,
     args: &Value,
@@ -397,7 +403,7 @@ pub(super) fn refresh_result(
     vec![message]
 }
 
-pub(super) fn log_refresh(outcome: &canonical::embeddings::Refresh) {
+pub(in crate::cli) fn log_refresh(outcome: &canonical::embeddings::Refresh) {
     match outcome {
         canonical::embeddings::Refresh::Empty => eprintln!("WARNING: {ABSENT_EMBEDDINGS}"),
         canonical::embeddings::Refresh::Failed { reason, .. } => {

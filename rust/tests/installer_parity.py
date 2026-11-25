@@ -108,6 +108,17 @@ def install(cmd, root, home, platform, source, python):
     assert inventory(root, home) == before
     call(cmd, ["uninstall", *flags, "--yes"], root, env)
     assert get_servers() == {"untouched": {"command": "other"}}
+    if platform == "claude":
+        custom = {"command": sys.executable, "args": ["-m", "code_review_graph", "serve"], "env": {"MODE": "manual"}}
+        settings.write_text(json.dumps({"mcpServers": {"code-review-graph": custom}}, indent=2))
+        before = settings.read_bytes()
+        call(cmd, ["install", *flags, "--yes"], root, env)
+        assert settings.read_bytes() == before
+    else:
+        custom = '[mcp_servers.code-review-graph]\ncommand = "uv"\nargs = ["run","--project","other","code-review-graph","serve"]\n'
+        settings.write_text(custom)
+        call(cmd, ["install", *flags, "--yes"], root, env)
+        assert settings.read_text() == custom
     return docs, modes
 
 

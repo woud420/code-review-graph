@@ -59,8 +59,14 @@ parity:
 	"$(PYTHON)" -B rust/tests/eval_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/embedding_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/installer_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/install_options_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/hooks_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/visualize_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/http_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/worktree_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/doctor_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/watch_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/follow_symlinks_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/visualize_parity.py --serve --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/history_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/config_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/query_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
@@ -68,7 +74,7 @@ parity:
 	"$(PYTHON)" -B rust/tests/postprocess_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/search_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 
-upstream-surface public-parity graph-parity fixture-parity: parity-binary
+released-contract upstream-surface public-parity graph-parity fixture-parity: parity-binary
 
 .PHONY: parity-binary
 parity-binary:
@@ -87,5 +93,9 @@ fixture-parity:
 upstream-surface:
 	"$(PYTHON)" -B rust/tests/upstream_surface.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --report "$(PARITY_REPORT_DIR)/upstream-surface.json"
 
+.PHONY: released-contract
+released-contract:
+	"$(PYTHON)" -B rust/tests/released_cli_contract.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --report "$(PARITY_REPORT_DIR)/released-cli.json"
+
 cutover:
-	$(MAKE) -k parity public-parity graph-parity fixture-parity upstream-surface
+	$(MAKE) -k parity public-parity graph-parity fixture-parity upstream-surface released-contract

@@ -4,7 +4,7 @@ mod php;
 use crate::model::{BuildReport, Hit, Import, ParsedFile, Stats};
 use crate::parser::parse_file;
 use anyhow::{Context, Result, ensure};
-use ignore::WalkBuilder;
+pub mod discovery;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -114,6 +114,19 @@ impl Graph {
         rebuild: bool,
         include: impl Fn(&str) -> bool,
     ) -> Result<BuildReport> {
+        self.sync_paths(
+            root,
+            rebuild,
+            source_files(root)?.into_iter().filter(|file| include(file)),
+        )
+    }
+
+    pub(crate) fn sync_paths(
+        &mut self,
+        root: &Path,
+        rebuild: bool,
+        files: impl Iterator<Item = String>,
+    ) -> Result<BuildReport> {
         let root = fs::canonicalize(root).with_context(|| format!("opening {}", root.display()))?;
         ensure!(root.is_dir(), "repository path must be a directory");
         let root_name = root.to_str().context("repository path is not UTF-8")?;
@@ -147,7 +160,7 @@ impl Graph {
         let mut files_parsed = 0;
         let mut files_unchanged = 0;
         let mut dbt = crate::parser::sql::dbt::Projects::default();
-        for file in source_files(&root)?.into_iter().filter(|p| include(p)) {
+        for file in files {
             let bytes = fs::read(root.join(&file)).with_context(|| format!("reading {file}"))?;
             let hash = blake3::hash(&bytes).to_hex().to_string();
             let previous_hash = old.remove(&file);
@@ -311,67 +324,7 @@ fn stats(conn: &Connection) -> Result<Stats> {
 }
 
 fn source_files(root: &Path) -> Result<Vec<String>> {
-    let mut files = Vec::new();
-    let walk = WalkBuilder::new(root)
-        .hidden(false)
-        .require_git(false)
-        .filter_entry(|e| {
-            e.depth() == 0
-                || !matches!(
-                    e.file_name().to_str(),
-                    Some(
-                        ".git"
-                            | ".code-review-graph"
-                            | ".code-review-graph-rs"
-                            | "target"
-                            | "node_modules"
-                            | ".venv"
-                            | "venv"
-                            | "__pycache__"
-                    )
-                )
-        })
-        .build();
-    for entry in walk {
-        let entry = entry?;
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let file_name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        let json = ext == "json"
-            && !matches!(
-                file_name,
-                "package-lock.json" | "npm-shrinkwrap.json" | "project.assets.json"
-            )
-            && !file_name.ends_with(".lock.json")
-            && !file_name.ends_with(".min.json");
-        if JS_EXTENSIONS.contains(&ext)
-            || matches!(
-                ext,
-                "py" | "rs" | "go" | "java" | "cs" | "sol" | "lua" | "luau" | "php"
-            )
-            || crate::parser::extensions::language(ext).is_some()
-            || json
-            || crate::parser::cfamily::supports(ext)
-            || crate::parser::bash::discover(path)
-            || crate::parser::sql::supports(ext)
-            || matches!(ext, "yaml" | "yml" | "tf" | "hcl" | "rb")
-            || (ext == "properties" && crate::parser::yaml::spring::supports(path))
-        {
-            let relative = path
-                .strip_prefix(root)?
-                .to_str()
-                .context("source path is not UTF-8")?;
-            files.push(relative.replace(std::path::MAIN_SEPARATOR, "/"));
-        }
-    }
-    files.sort();
-    Ok(files)
+    discovery::Inventory::source_files(root)
 }
 
 fn store_file(
@@ -515,7 +468,21 @@ impl Resolver {
             &import.module,
             self.modules.contains_key("__init__.py"),
         )?;
-        let module = self.python_file(&base);
+        let module = if import.module.starts_with('.') {
+            self.python_file(&base)
+        } else {
+            crate::model::python_modules::absolute_module(file, &import.module, |p| {
+                self.modules.contains_key(p)
+            })
+        };
+        let base = module
+            .as_deref()
+            .and_then(|p| {
+                p.strip_suffix("/__init__.py")
+                    .or_else(|| p.strip_suffix(".py"))
+            })
+            .filter(|_| !import.module.starts_with('.'))
+            .map_or(base, str::to_owned);
 
         // "from pkg import x" can bind pkg.x when x is a submodule. An
         // explicit export from __init__.py wins, except when it is this very import.

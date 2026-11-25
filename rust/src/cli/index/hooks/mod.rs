@@ -1,4 +1,5 @@
-use super::{build, changes, store};
+use super::{build, store};
+use crate::cli::changes;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
@@ -10,7 +11,7 @@ use std::{
 };
 
 mod enrich;
-pub(super) use enrich::search_hook;
+pub(in crate::cli) use enrich::search_hook;
 
 fn payload() -> Option<Value> {
     let mut bytes = Vec::new();
@@ -105,7 +106,7 @@ fn has_graph(root: &Path) -> bool {
     db.is_file() && recorded_root(&db).as_deref() == Some(root)
 }
 
-pub(super) fn update(existing_only: bool) -> Result<()> {
+pub(in crate::cli) fn update(existing_only: bool) -> Result<()> {
     let Some(event) = payload() else {
         return Ok(());
     };
@@ -142,7 +143,7 @@ pub(super) fn update(existing_only: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn status() -> Result<()> {
+pub(in crate::cli) fn status() -> Result<()> {
     let Some(root) = payload()
         .as_ref()
         .and_then(cwd)

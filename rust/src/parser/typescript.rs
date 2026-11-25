@@ -509,6 +509,24 @@ fn is_value_or_type_reference(node: Node<'_>) -> bool {
         return false;
     };
     if node.kind() == "type_identifier" {
+        if std::iter::successors(node.parent(), |v| v.parent())
+            .take_while(|v| {
+                matches!(
+                    v.kind(),
+                    "array_type"
+                        | "type_arguments"
+                        | "generic_type"
+                        | "union_type"
+                        | "intersection_type"
+                )
+            })
+            .any(|v| {
+                v.kind() == "type_arguments"
+                    && v.parent().is_some_and(|p| p.kind() == "call_expression")
+            })
+        {
+            return true;
+        }
         return std::iter::successors(Some(p), |n| n.parent())
             .take_while(|n| {
                 matches!(

@@ -31,14 +31,14 @@ hex = "0.4"
 ignore = "0.4"
 indexmap = "2"
 regex = "1"
-rmcp = { version = "3.11", features = ["transport-io"] }
+rmcp = { version = "3.11", features = ["transport-io", "transport-streamable-http-server"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 signal-hook = "0.3"
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "process", "io-util", "io-std", "fs", "time", "sync", "macros", "signal"] }
 tree-sitter = "0.26"
 tree-sitter-bash = "0.25.1"
 tree-sitter-javascript = "0.25"
@@ -72,3 +72,14 @@ csv = "1.4"
 toml_edit = "0.25"
 ureq = { version = "2.12", features = ["json"] }
 url = "2.5"
+tree-sitter-julia = "0.23.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tree-sitter-verilog = "1.0.3"
+tree-sitter-elixir = "0.3.5"
+tree-sitter-dart = "0.3.0"
+notify = "8"
+tree-sitter-scala = "0.26.13"
+tree-sitter-gdscript = "6.1.0"
+tree-sitter-objc = "3.0.2"
+tree-sitter-perl = "1.1.2"
+tree-sitter-html = "0.23.2"

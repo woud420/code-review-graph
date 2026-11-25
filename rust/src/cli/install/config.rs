@@ -1,21 +1,50 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::Path;
 use toml_edit::{Array, DocumentMut, Table, value};
 
-fn is_ours(command: &str, args: impl Iterator<Item = String>) -> bool {
-    let args: Vec<_> = args.collect();
-    let name = Path::new(command)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let native =
-        name == "code-review-graph" && args.first().is_some_and(|s| s == "serve" || s == "mcp");
-    let python =
-        name.starts_with("python") && args.windows(2).any(|w| w == ["-m", "code_review_graph"]);
-    native
-        || python
-        || (matches!(name, "uv" | "uvx" | "pipx") && args.iter().any(|s| s == "code-review-graph"))
+fn is_ours(entry: &Value, binary: &Path) -> bool {
+    let Some(fields) = entry.as_object() else {
+        return false;
+    };
+    if fields.keys().any(|k| {
+        !matches!(
+            k.as_str(),
+            "name" | "type" | "command" | "args" | "cwd" | "tools" | "env"
+        )
+    }) || fields
+        .get("type")
+        .is_some_and(|t| !matches!(t.as_str(), Some("stdio" | "local")))
+        || fields.get("tools").is_some_and(|t| *t != json!(["*"]))
+        || fields
+            .get("env")
+            .is_some_and(|e| *e != json!({}) && *e != json!([]))
+    {
+        return false;
+    }
+    let (Some(command), Some(args)) = (entry["command"].as_str(), entry["args"].as_array()) else {
+        return false;
+    };
+    let Some(mut args) = args.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    if args.len() >= 2 && args[args.len() - 2] == "--repo" {
+        args.truncate(args.len() - 2);
+    }
+    let name = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    match args.as_slice() {
+        ["serve"] => name == "code-review-graph" || Path::new(command) == binary,
+        ["code-review-graph", "serve"] => name == "uvx",
+        ["run", "code-review-graph", "serve"] => matches!(name, "uv" | "poetry"),
+        ["-m", "code_review_graph", "serve"] => {
+            static PYTHON: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+                regex::Regex::new(r"^pythonw?[0-9]*(?:\.[0-9]+)*$").unwrap()
+            });
+            PYTHON.is_match(name)
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn json_config(
@@ -39,17 +68,9 @@ pub(super) fn json_config(
         .as_object_mut()
         .context("mcpServers must be an object")?;
     if let Some(previous) = servers.get("code-review-graph") {
-        ensure!(
-            is_ours(
-                previous["command"].as_str().unwrap_or(""),
-                previous["args"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-            ),
-            "existing MCP entry belongs to another command"
-        );
+        if !is_ours(previous, binary) {
+            return Ok(before.into());
+        }
     } else if remove {
         return Ok(before.into());
     }
@@ -85,21 +106,11 @@ pub(super) fn codex_config(
     let table = doc["mcp_servers"]
         .as_table_mut()
         .context("mcp_servers must be a table")?;
-    if let Some(previous) = table.get("code-review-graph") {
-        let old = previous
-            .as_table_like()
-            .context("MCP entry must be a table")?;
-        ensure!(
-            is_ours(
-                old.get("command").and_then(|v| v.as_str()).unwrap_or(""),
-                old.get("args")
-                    .and_then(|v| v.as_array())
-                    .into_iter()
-                    .flat_map(|a| a.iter())
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-            ),
-            "existing MCP entry belongs to another command"
-        );
+    if table.contains_key("code-review-graph") {
+        let prior: Value = toml::from_str(before)?;
+        if !is_ours(&prior["mcp_servers"]["code-review-graph"], binary) {
+            return Ok(before.into());
+        }
         if remove {
             table.remove("code-review-graph");
             return Ok(doc.to_string());
@@ -200,6 +211,41 @@ pub(super) fn hooks(before: &str, template: &str, binary: &Path) -> Result<Strin
                 entries.push(group);
             }
         }
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&doc)?))
+}
+
+pub(super) fn without_steering(before: &str, template: &str) -> Result<String> {
+    if before.is_empty() {
+        return Ok(String::new());
+    }
+    let mut doc: Value = serde_json::from_str(before)?;
+    let Some(groups) = doc["hooks"]["PreToolUse"].as_array_mut() else {
+        return Ok(before.into());
+    };
+    let template: Value = serde_json::from_str(template)?;
+    let wanted = &template["hooks"]["PreToolUse"][0];
+    let mut changed = false;
+    for group in groups
+        .iter_mut()
+        .filter(|g| g["matcher"] == wanted["matcher"])
+    {
+        let Some(items) = group["hooks"].as_array_mut() else {
+            continue;
+        };
+        items.retain(|item| {
+            let single = json!({"matcher":wanted["matcher"],"hooks":[item]});
+            let remove = same_hook(&single, wanted, wanted);
+            changed |= remove;
+            !remove
+        });
+    }
+    if !changed {
+        return Ok(before.into());
+    }
+    groups.retain(|g| !g["hooks"].as_array().is_some_and(Vec::is_empty));
+    if groups.is_empty() {
+        doc["hooks"].as_object_mut().unwrap().remove("PreToolUse");
     }
     Ok(format!("{}\n", serde_json::to_string_pretty(&doc)?))
 }

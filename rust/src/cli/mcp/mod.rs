@@ -1,4 +1,6 @@
+pub(super) mod http;
 mod prompts;
+pub(super) mod worktree;
 use super::{query, registry, reports, search, store, wiki, wire};
 use anyhow::{Result, anyhow};
 use rmcp::{
@@ -12,7 +14,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone)]
 struct Server {
+    multi_repo: bool,
     hints: Arc<reports::Hints>,
     root: PathBuf,
     tools: Vec<Tool>,
@@ -41,6 +45,7 @@ fn call(
     name: &str,
     args: Map<String, Value>,
     hints: &reports::Hints,
+    multi_repo: bool,
 ) -> Result<Value> {
     if name == "cross_repo_search_tool" {
         return registry::cross_search(&Value::Object(args));
@@ -51,9 +56,11 @@ fn call(
             json!({"status":"ok","summary":format!("{} registered repository(ies)",repos.len()),"repos":repos}),
         );
     }
-    let root = match args.get("repo_root").and_then(Value::as_str) {
-        Some(dir) => super::absolute(Path::new(dir))?,
-        None => root.to_owned(),
+    let requested = args.get("repo_root").and_then(Value::as_str);
+    let root = match (multi_repo, requested) {
+        (true, path) => http::registered(path)?,
+        (false, Some(dir)) => super::absolute(Path::new(dir))?,
+        (false, None) => root.to_owned(),
     };
     let data = Value::Object(args);
     if name == "embed_graph_tool" {
@@ -167,8 +174,15 @@ fn attach_provenance(mut result: Value, conn: &rusqlite::Connection, root: &Path
 
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerConfig {
-        serde_json::from_str(include_str!("../../../assets/cli/server.json"))
-            .expect("bundled server information")
+        let mut info: ServerConfig =
+            serde_json::from_str(include_str!("../../../assets/cli/server.json"))
+                .expect("bundled server information");
+        if self.multi_repo {
+            info.instructions
+                .get_or_insert_with(String::new)
+                .push_str(http::INSTRUCTIONS);
+        }
+        info
     }
     #[allow(
         deprecated,
@@ -245,9 +259,11 @@ impl ServerHandler for Server {
             }
         }
         let hints = self.hints.clone();
-        let result = tokio::task::spawn_blocking(move || call(&root, &name, args, &hints))
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let multi_repo = self.multi_repo;
+        let result =
+            tokio::task::spawn_blocking(move || call(&root, &name, args, &hints, multi_repo))
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let packet = match result {
             Ok(data) => CallToolResult::structured(data),
             Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))]),
@@ -274,7 +290,7 @@ impl ServerHandler for Server {
     }
 }
 
-pub fn serve(root: &Path, filter: Option<String>) -> Result<()> {
+fn server(root: &Path, filter: Option<String>, multi_repo: bool) -> Result<Server> {
     let mut tools: Vec<Tool> =
         serde_json::from_str(include_str!("../../../assets/cli/tools.json"))?;
     let requested = filter
@@ -289,16 +305,26 @@ pub fn serve(root: &Path, filter: Option<String>) -> Result<()> {
     if !names.is_empty() {
         tools.retain(|t| names.contains(t.name.as_ref()));
     }
-    let server = Server {
+    Ok(Server {
+        multi_repo,
         root: root.to_owned(),
         hints: Arc::default(),
         tools,
-    };
+    })
+}
+
+pub fn serve(root: &Path, filter: Option<String>) -> Result<()> {
+    let server = server(root, filter, false)?;
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
         .block_on(async {
-            server.serve(stdio()).await?.waiting().await?;
+            use tokio::io::AsyncBufReadExt;
+            let (stdin, stdout) = stdio();
+            let mut input = tokio::io::BufReader::new(stdin);
+            if !input.fill_buf().await?.is_empty() {
+                server.serve((input, stdout)).await?.waiting().await?;
+            }
             Ok(())
         })
 }

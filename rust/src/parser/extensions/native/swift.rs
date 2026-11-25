@@ -1,36 +1,8 @@
 use super::super::syntax::{call, child, children, edge, field, qualified, text};
+use super::identity::overload;
 use super::{declare, function_kind};
 use crate::model::{ParsedFile, syntax::Definition};
-use sha2::{Digest, Sha256};
 use tree_sitter::Node;
-
-fn identity(file: &ParsedFile, class: &str, name: &str, kind: &str) -> String {
-    let id = qualified(class, name);
-    if !file.syntax.declarations.contains_key(&id) {
-        return id;
-    }
-    let parent = (!class.is_empty()).then_some(class);
-    let payload = serde_json::to_string(&(
-        kind,
-        name,
-        parent,
-        "swift",
-        None::<&str>,
-        None::<&str>,
-        None::<&str>,
-        kind == "Test",
-    ))
-    .unwrap();
-    let suffix = hex::encode(&Sha256::digest(payload)[..6]);
-    let base = format!("{id}:S{suffix}");
-    if !file.syntax.declarations.contains_key(&base) {
-        return base;
-    }
-    (2..)
-        .map(|n| format!("{base}:{n}"))
-        .find(|v| !file.syntax.declarations.contains_key(v))
-        .unwrap()
-}
 
 pub(super) fn walk(
     n: Node<'_>,
@@ -39,6 +11,7 @@ pub(super) fn walk(
     class: &str,
     container: &str,
     caller: &str,
+    test_file: bool,
 ) {
     match n.kind() {
         "import_declaration" => {
@@ -47,7 +20,7 @@ pub(super) fn walk(
         }
         "class_declaration" | "protocol_declaration" => {
             if let Some(name) = field(n, "name", s) {
-                let id = identity(file, class, name, "Class");
+                let id = overload(file, class, name, "Class", "swift", None, test_file);
                 let token = n
                     .children(&mut n.walk())
                     .find(|v| {
@@ -77,7 +50,15 @@ pub(super) fn walk(
                     }
                 }
                 if let Some(body) = n.child_by_field_name("body") {
-                    walk(body, s, file, &qualified(class, name), &id, caller);
+                    walk(
+                        body,
+                        s,
+                        file,
+                        &qualified(class, name),
+                        &id,
+                        caller,
+                        test_file,
+                    );
                 }
                 return;
             }
@@ -93,13 +74,13 @@ pub(super) fn walk(
             };
             if let Some(name) = name {
                 let kind = function_kind(name);
-                let id = identity(file, class, name, kind);
+                let id = overload(file, class, name, kind, "swift", None, test_file);
                 declare(file, n, &id, kind, Default::default());
                 if container != class {
                     file.syntax.containers.insert(id.clone(), container.into());
                 }
                 for c in children(n) {
-                    walk(c, s, file, class, container, &id);
+                    walk(c, s, file, class, container, &id, test_file);
                 }
                 return;
             }
@@ -134,6 +115,6 @@ pub(super) fn walk(
         _ => {}
     }
     for c in children(n) {
-        walk(c, s, file, class, container, caller);
+        walk(c, s, file, class, container, caller, test_file);
     }
 }

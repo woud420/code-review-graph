@@ -54,6 +54,9 @@ def main():
             for flags in ([], ["--json"], ["--days","1"], ["--days","1","--json"]):
                 history("--by", by, *flags)
         # Use identical absolute paths in each executable's output, rebuilding state between writers.
+        # The graph records build time to whole seconds. Give both processes the
+        # same old source mtime so a second boundary cannot flip the stale warning.
+        os.utime(repo/"main.py", (1_600_000_000, 1_600_000_000))
         probes = []
         for label in ("Python", "Rust"):
             args = ["--repo", str(repo)]

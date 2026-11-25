@@ -2,6 +2,7 @@ pub mod cfamily;
 pub mod go;
 pub mod hcl;
 pub mod json;
+pub(crate) mod python_modules;
 pub mod ruby;
 pub mod sql;
 pub mod syntax;

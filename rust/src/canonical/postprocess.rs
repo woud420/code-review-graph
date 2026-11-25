@@ -212,6 +212,7 @@ fn resolve_bare(tx: &Transaction<'_>, nodes: &[Node]) -> Result<usize> {
                             None => {
                                 file.ends_with(".go")
                                     || (n.language == "sql" && n.file == file)
+                                    || (file.ends_with(".ipynb") && n.file == file)
                                     || extra.get("member_call").is_some()
                                     || extra.get("receiver").is_none()
                                         && extra.get("receiver_form").is_none()
