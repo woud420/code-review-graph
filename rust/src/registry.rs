@@ -105,6 +105,23 @@ pub fn register_repo(path: &Path, alias: Option<String>) -> Result<Value> {
     Ok(registered)
 }
 
+pub fn set_data_dir(root: &Path, dir: &Path) -> Result<()> {
+    let path = absolute(root)?;
+    let dir = absolute(dir)?;
+    fs::create_dir_all(&dir)?;
+    modify(|entries| {
+        if let Some(found) = entries
+            .iter_mut()
+            .find(|v| v["path"].as_str() == path.to_str())
+        {
+            found["data_dir"] = json!(dir);
+        } else {
+            entries.push(json!({"path":path,"data_dir":dir}));
+        }
+        Ok(true)
+    })
+}
+
 pub fn unregister_repo(raw: &str) -> Result<bool> {
     let path = absolute(Path::new(raw))?;
     let mut found = false;

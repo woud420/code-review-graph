@@ -43,6 +43,19 @@ impl Source {
         facts: &crate::model::ParsedFile,
         paths: &BTreeSet<String>,
     ) -> Option<(String, String)> {
+        if matches!(self.language, "lua" | "luau")
+            && facts.symbols.iter().any(|symbol| {
+                symbol
+                    .name
+                    .rsplit_once('.')
+                    .is_some_and(|(_, name)| name == callee)
+            })
+        {
+            return Some((
+                callee.into(),
+                format!("{}::{callee}", root.join(file).display()),
+            ));
+        }
         if self.language != "python" || !self.extra_edges.direct_name(callee) {
             return None;
         }
@@ -61,7 +74,17 @@ impl Source {
             Some("bash")
         } else {
             match path.extension().and_then(|s| s.to_str()) {
+                Some("rb") => Some("ruby"),
+                Some("tf" | "hcl") => Some("hcl"),
+                Some("yaml" | "yml" | "properties") => Some("yaml"),
+                Some(ext) if crate::parser::sql::supports(ext) => Some("sql"),
                 Some(ext) if crate::parser::cfamily::supports(ext) => Some("c"),
+                Some("lua") => Some("lua"),
+                Some("luau") => Some("luau"),
+                Some("php") => Some("php"),
+                Some("sol") => Some("solidity"),
+                Some("cs") => Some("csharp"),
+                Some("java") => Some("java"),
                 Some("go") => Some("go"),
                 Some("json") => Some("json"),
                 _ => None,

@@ -2,7 +2,7 @@ use super::*;
 use crate::cli::query::{is_test, test_count};
 use std::collections::HashSet;
 
-fn exempt(node: &Value, root: &Path) -> bool {
+pub(in crate::cli::reports) fn exempt(node: &Value, root: &Path) -> bool {
     let name = text(node, "name");
     node["kind"] == "Function"
         && (matches!(
@@ -45,15 +45,21 @@ pub(super) fn gaps<'a>(radius: &'a Radius, root: &Path) -> Vec<&'a Value> {
         .collect()
 }
 
-fn score(conn: &Connection, node: &Value, root: &Path) -> Result<f64> {
+pub(in crate::cli::reports) fn signals(
+    conn: &Connection,
+    node: &Value,
+    root: &Path,
+    churn: usize,
+) -> Result<Value> {
     let id = node["id"].as_i64().unwrap_or_default();
     let qn = text(node, "qualified_name");
-    let flows:f64=conn.query_row("SELECT coalesce(sum(f.criticality),count(m.flow_id)*0.05) FROM flow_memberships m LEFT JOIN flows f ON f.id=m.flow_id WHERE node_id=?1",[id],|r|r.get(0))?;
+    let (flow_count,flows):(i64,f64)=conn.query_row("SELECT count(m.flow_id),coalesce(sum(f.criticality),count(m.flow_id)*0.05) FROM flow_memberships m LEFT JOIN flows f ON f.id=m.flow_id WHERE node_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;
     let (callers,cross):(i64,i64)=conn.query_row("SELECT count(e.id),count(DISTINCT CASE WHEN c.community_id != n.community_id THEN c.qualified_name END) FROM nodes n JOIN edges e ON e.target_qualified=n.qualified_name AND e.kind='CALLS' LEFT JOIN nodes c ON c.qualified_name=e.source_qualified WHERE n.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;
-    let coverage = if is_test(node, root) && exempt(node, root) {
-        0.0
+    let (coverage, tests) = if is_test(node, root) && exempt(node, root) {
+        (0.0, 0)
     } else {
-        0.30 - (test_count(conn, node)?.min(5) as f64 / 5.0) * 0.25
+        let n = test_count(conn, node)?;
+        (0.30 - (n.min(5) as f64 / 5.0) * 0.25, n)
     };
     let name = qn.to_lowercase();
     let sensitive = [
@@ -85,14 +91,23 @@ fn score(conn: &Connection, node: &Value, root: &Path) -> Result<f64> {
     ]
     .iter()
     .any(|k| name.contains(k));
-    let sum = flows.min(0.25)
-        + (cross as f64 * 0.05).min(0.15)
-        + coverage
-        + if sensitive { 0.2 } else { 0.0 }
-        + (callers as f64 / 20.).min(0.1);
-    Ok((sum.min(1.0) * 1e4).round_ties_even() / 1e4)
+    let term = |score: f64, count: i64| json!({"score":score,"count":count});
+    Ok(
+        json!({"flows":term(flows.min(0.25),flow_count),"cross_community":term((cross as f64*0.05).min(0.15),cross),"tests":term(coverage,tests as i64),"security":term(if sensitive{0.2}else{0.0},i64::from(sensitive)),"callers":term((callers as f64/20.).min(0.1),callers),"churn":term((churn as f64/10.).min(1.)*0.15,churn as i64)}),
+    )
 }
 
+pub(in crate::cli::reports) fn score(conn: &Connection, node: &Value, root: &Path) -> Result<f64> {
+    let data = signals(conn, node, root, 0)?;
+    let total = data
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|t| t["score"].as_f64())
+        .sum::<f64>()
+        .min(1.0);
+    Ok((total * 1e4).round_ties_even() / 1e4)
+}
 pub(super) fn by_file(
     conn: &Connection,
     root: &Path,
@@ -134,19 +149,23 @@ pub(super) fn by_file(
     Ok(risks)
 }
 
-fn tested_caller(conn: &Connection, node: &Value, root: &Path) -> Result<bool> {
+pub(in crate::cli::reports) fn caller_route(
+    conn: &Connection,
+    node: &Value,
+    root: &Path,
+) -> Result<Option<(String, usize, String)>> {
     let start = text(node, "qualified_name").to_owned();
     let mut seen = HashSet::from([start.clone()]);
-    let mut frontier = vec![start];
+    let mut frontier = vec![(start, String::new())];
     let cap = std::env::var("CRG_CALLER_TEST_ROUTE_MAX_CALLERS")
         .ok()
-        .and_then(|v| v.parse::<i64>().ok())
+        .and_then(|n| n.parse::<i64>().ok())
         .unwrap_or(500);
     let mut incoming=conn.prepare("SELECT DISTINCT n.* FROM edges e JOIN nodes n ON n.qualified_name=e.source_qualified WHERE e.target_qualified=?1 AND e.kind='CALLS' AND instr(e.source_qualified,'::')>0 AND json_type(e.extra,'$.unresolved_targets') IS NULL AND json_type(e.extra,'$.ambiguous_targets') IS NULL ORDER BY n.qualified_name")?;
-    let mut has_test=conn.prepare("SELECT EXISTS(SELECT 1 FROM edges e JOIN nodes n ON n.qualified_name=e.target_qualified WHERE e.kind='TESTED_BY' AND e.source_qualified=?1 AND json_type(e.extra,'$.unresolved_targets') IS NULL AND json_type(e.extra,'$.ambiguous_targets') IS NULL AND (n.is_test OR n.kind='Test'))")?;
-    for _ in 0..2 {
+    let mut tests=conn.prepare("SELECT target_qualified FROM edges WHERE kind='TESTED_BY' AND source_qualified=?1 AND json_type(extra,'$.unresolved_targets') IS NULL AND json_type(extra,'$.ambiguous_targets') IS NULL LIMIT 1")?;
+    for depth in 1..=2 {
         let mut next = Vec::new();
-        for qn in frontier {
+        for (qn, via) in frontier {
             let count: i64 = conn.query_row(
                 "SELECT count(*) FROM edges WHERE kind='CALLS' AND target_qualified=?1",
                 [&qn],
@@ -155,24 +174,39 @@ fn tested_caller(conn: &Connection, node: &Value, root: &Path) -> Result<bool> {
             if count > cap {
                 continue;
             }
-            for caller in incoming.query_map([&qn], crate::cli::query::node)? {
-                let caller = caller?;
-                let name = text(&caller, "qualified_name");
-                if !seen.insert(name.to_string()) {
+            for n in incoming.query_map([&qn], crate::cli::query::node)? {
+                let n = n?;
+                let name = text(&n, "qualified_name").to_string();
+                if !seen.insert(name.clone()) {
                     continue;
                 }
-                if caller["kind"] == "Test"
-                    || (!is_test(&caller, root)
-                        && has_test.query_row([name], |r| r.get::<_, bool>(0))?)
-                {
-                    return Ok(true);
+                if n["kind"] == "Test" {
+                    return Ok(Some((
+                        if via.is_empty() {
+                            name.clone()
+                        } else {
+                            via.clone()
+                        },
+                        depth,
+                        name,
+                    )));
                 }
-                next.push(name.to_string());
+                if !is_test(&n, root)
+                    && let Some(test) = tests
+                        .query_row([&name], |r| r.get::<_, String>(0))
+                        .optional()?
+                {
+                    return Ok(Some((name, depth, test)));
+                }
+                next.push((
+                    name.clone(),
+                    if via.is_empty() { name } else { via.clone() },
+                ));
             }
         }
         frontier = next;
     }
-    Ok(false)
+    Ok(None)
 }
 
 pub(super) fn guidance(
@@ -203,7 +237,7 @@ pub(super) fn guidance(
         let mut indirect = Vec::new();
         let mut unreached = Vec::new();
         for n in untested {
-            if tested_caller(conn, n, root)? {
+            if caller_route(conn, n, root)?.is_some() {
                 indirect.push(*n)
             } else {
                 unreached.push(*n)

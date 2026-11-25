@@ -14,7 +14,7 @@ fn value_type(kind: &str) -> Option<&str> {
     }
 }
 
-fn child_path(prefix: &str, key: &str) -> String {
+pub(super) fn child_path(prefix: &str, key: &str) -> String {
     let mut chars = key.chars();
     if chars
         .next()
@@ -36,7 +36,7 @@ fn locale_tag(value: &str) -> bool {
         && parts.all(|p| (2..=8).contains(&p.len()) && p.bytes().all(|c| c.is_ascii_alphanumeric()))
 }
 
-fn file_class(path: &Path) -> Option<&'static str> {
+pub(super) fn file_class(path: &Path) -> Option<&'static str> {
     let name = path.file_stem()?.to_str()?.to_ascii_lowercase();
     let parent = path.parent()?;
     let folders: Vec<String> = parent

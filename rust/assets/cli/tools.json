@@ -101,6 +101,142 @@
       }
     },
     "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Run post-processing on existing graph (flows, communities, FTS index).\n\nUse after building with postprocess=\"none\" or \"minimal\", or to re-run\nexpensive steps independently. Signatures are always computed.\n\nTakes the same per-repository write lock as ``build_or_update_graph_tool``.\nWhen a build, update or another postprocess is already running, this\nreturns immediately with ``status=\"contended\"``, ``skipped=true`` and the\n``holder_pid``, instead of recomputing derived data for a graph that is\nstill being written; retry once that write finishes.",
+    "inputSchema": {
+      "properties": {
+        "flows": {
+          "default": true,
+          "type": "boolean",
+          "description": "Run flow detection. Default: True."
+        },
+        "communities": {
+          "default": true,
+          "type": "boolean",
+          "description": "Run community detection. Default: True."
+        },
+        "fts": {
+          "default": true,
+          "type": "boolean",
+          "description": "Rebuild FTS index. Default: True."
+        },
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repository root path. Auto-detected if omitted."
+        },
+        "embedding_provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact provider for an explicit embedding refresh.\nMust be supplied with embedding_model. Default: disabled.\nRefreshes an existing index only: on a graph with no embeddings\nthe result sets embeddings_refresh_skipped; run embed_graph_tool first."
+        },
+        "embedding_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact model for an explicit embedding refresh.\nMust be supplied with embedding_provider. Default: disabled."
+        }
+      },
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "run_postprocess_tool",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "title": "Run Postprocess Tool"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Get ultra-compact context for any task (~100 tokens). Always call this first.\n\nReturns graph stats, risk score, top communities/flows, and suggested\nnext tools in a single compact response. Use this as the entry point\nbefore any other graph tool to minimize token usage. Returns\n``status: not_ready`` with a build suggestion when the graph is missing,\nempty, or known to have been built at a different Git commit.",
+    "inputSchema": {
+      "properties": {
+        "task": {
+          "default": "",
+          "type": "string",
+          "description": "What you are doing (e.g. \"review PR #42\", \"debug login timeout\")."
+        },
+        "changed_files": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit list of changed files. Auto-detected if omitted."
+        },
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repository root path. Auto-detected if omitted."
+        },
+        "base": {
+          "default": "HEAD~1",
+          "type": "string",
+          "description": "Git ref for diff comparison. Default: HEAD~1."
+        }
+      },
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "get_minimal_context_tool",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "title": "Get Minimal Context Tool"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "annotations": {
       "readOnlyHint": true
     },
     "description": "Analyze the blast radius of changed files in the codebase.\n\nShows which functions, classes, and files are impacted by changes.\nAuto-detects changed files from git if not specified.\n\nAn impacted node that calls or references the changed code directly also\ncarries the ``call_site`` (file and line) it does so at, and\n``unresolved_call_sites`` counts call sites that name a changed symbol but\nwere never bound to it, so an empty radius is not mistaken for proof.",
@@ -976,6 +1112,279 @@
     "annotations": {
       "readOnlyHint": true
     },
+    "description": "Detect changes and produce risk-scored, priority-ordered review guidance.\n\nPrimary tool for code review. Maps git diffs to affected functions,\nYAML paths, flows, communities, and test coverage gaps. Returns risk\nscores and prioritized review items. Functions and classes the diff\ndeleted are listed in removed_symbols with what still uses them.\nReplaces get_review_context for change-aware reviews.",
+    "inputSchema": {
+      "properties": {
+        "base": {
+          "default": "HEAD~1",
+          "type": "string",
+          "description": "Git ref to diff against. Default: HEAD~1."
+        },
+        "changed_files": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "List of changed file paths (relative to repo root). Auto-detected if omitted."
+        },
+        "include_source": {
+          "default": false,
+          "type": "boolean",
+          "description": "Include source code snippets for changed functions. Default: False."
+        },
+        "max_depth": {
+          "default": 2,
+          "type": "integer",
+          "description": "Impact radius depth for BFS traversal. Default: 2."
+        },
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repository root path. Auto-detected if omitted."
+        },
+        "detail_level": {
+          "default": "standard",
+          "type": "string",
+          "description": "\"standard\" for full output, \"minimal\" for\ntoken-efficient summary. Default: standard."
+        },
+        "max_results": {
+          "default": 25,
+          "type": "integer",
+          "description": "Maximum changed functions, YAML paths, test gaps, and changed files\nto return; the matching *_total fields report the full counts.\nDefault: 25."
+        },
+        "max_flows": {
+          "default": 20,
+          "type": "integer",
+          "description": "Maximum affected flows to embed. Embedded flows carry\nper-flow metadata only — use get_affected_flows_tool for step\ndetail. Default: 20."
+        }
+      },
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "detect_changes_tool",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "title": "Detect Changes Tool"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Graph-powered refactoring operations.\n\nUnified entry point for rename previews, dead code detection, and\nrefactoring suggestions.\n\nModes:\n- rename: Preview renaming a symbol. Returns an edit list and a refactor_id\n  to pass to apply_refactor_tool. Requires old_name and new_name.\n- dead_code: Find unreferenced functions/classes (no callers, tests, or\n  importers, and not entry points).\n- suggest: Get community-driven refactoring suggestions (move misplaced\n  functions, remove dead code).",
+    "inputSchema": {
+      "properties": {
+        "mode": {
+          "default": "rename",
+          "type": "string",
+          "description": "Operation mode: \"rename\", \"dead_code\", or \"suggest\"."
+        },
+        "old_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(rename) Current symbol name to rename."
+        },
+        "new_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(rename) Desired new name for the symbol."
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(dead_code) Optional filter: Function or Class."
+        },
+        "file_pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(dead_code) Filter by file path substring."
+        },
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repository root path. Auto-detected if omitted."
+        },
+        "max_results": {
+          "default": 50,
+          "type": "integer",
+          "description": "Maximum edits/symbols/suggestions in the response;\ntotal reports the full count. The stored rename preview keeps\nevery edit, so apply_refactor_tool still applies them all.\nDefault: 50."
+        },
+        "detail_level": {
+          "default": "standard",
+          "type": "string",
+          "description": "\"standard\" for full records, \"minimal\" for\nidentifying fields only. Default: standard."
+        }
+      },
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "refactor_tool",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "title": "Refactor Tool"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Apply a previously previewed refactoring to source files.\n\nTakes a refactor_id from a prior refactor_tool(mode=\"rename\") call and\napplies the exact string replacements to the target files. Previews\nexpire after 10 minutes.\n\nSecurity: All edit paths are validated to be within the repo root.\nOnly exact string replacements are performed (no regex, no eval).",
+    "inputSchema": {
+      "properties": {
+        "refactor_id": {
+          "type": "string",
+          "description": "The refactor ID from refactor_tool's response."
+        },
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repository root path. Auto-detected if omitted."
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean",
+          "description": "If True, return a unified diff of what would change\nwithout touching any files. The refactor_id remains valid so\nthe same preview can be applied in a follow-up call without\ndry_run. Use this for a human-in-the-loop review before\ncommitting changes to disk. See: #176"
+        },
+        "max_diff_files": {
+          "default": 25,
+          "type": "integer",
+          "description": "Maximum per-file diffs to include in a dry run.\nwould_modify still lists every file. Default: 25."
+        }
+      },
+      "required": [
+        "refactor_id"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "apply_refactor_tool",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "title": "Apply Refactor Tool"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Generate a markdown wiki from the code community structure.\n\nCreates a wiki page for each detected community and an index page.\nPages are written to .code-review-graph/wiki/ inside the repository.\nOnly regenerates pages whose content has changed unless force=True.",
+    "inputSchema": {
+      "properties": {
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repository root path. Auto-detected if omitted."
+        },
+        "force": {
+          "default": false,
+          "type": "boolean",
+          "description": "If True, regenerate all pages even if content unchanged. Default: False."
+        }
+      },
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "generate_wiki_tool",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "title": "Generate Wiki Tool"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
     "description": "Retrieve a specific wiki page by community name.\n\nReturns the markdown content of the wiki page for the given community.\nThe wiki must have been generated first via generate_wiki_tool.",
     "inputSchema": {
       "properties": {
@@ -1228,6 +1637,63 @@
       "additionalProperties": true
     },
     "title": "Get Suggested Questions Tool"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "BFS/DFS traversal from best-matching node with token budget.\n\nFree-form graph exploration: finds the node best matching your\nquery, then traverses outward via BFS or DFS up to the given\ndepth, collecting connected nodes within the token budget.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search string to find the starting node."
+        },
+        "mode": {
+          "default": "bfs",
+          "type": "string",
+          "description": "Traversal mode: \"bfs\" (breadth-first) or \"dfs\"\n(depth-first). Default: bfs."
+        },
+        "depth": {
+          "default": 3,
+          "type": "integer",
+          "description": "Max traversal depth (1-6). Default: 3."
+        },
+        "token_budget": {
+          "default": 2000,
+          "type": "integer",
+          "description": "Approximate token limit for results, at most 10000.\nThe walk stops when it runs out. Default: 2000."
+        },
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repository root path. Auto-detected if omitted."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "traverse_graph_tool",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "title": "Traverse Graph Tool"
   },
   {
     "_meta": {

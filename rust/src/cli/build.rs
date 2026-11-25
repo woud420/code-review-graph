@@ -5,6 +5,17 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::path::Path;
 
+fn contended(db_path: &Path, outcome: &str) -> Value {
+    let lock = db_path.with_file_name("write.lock");
+    let pid = std::fs::read_to_string(&lock)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let holder = pid.map_or_else(|| "another process".into(), |n| format!("PID {n}"));
+    json!({"status":"contended","skipped":true,"build_type":"none","holder_pid":pid,"lock_path":lock,
+                "files_parsed":0,"files_updated":0,"total_nodes":0,"total_edges":0,"errors":[],
+                "summary":format!("Another code-review-graph write is already running for this repository ({holder}); {outcome}. Pass wait_for_lock=True (CLI: --wait) to block until it finishes.")})
+}
+
 fn full_resolvers(report: &mut Value, db: &Connection) -> Result<()> {
     let files = |language: &str| {
         db.query_row(
@@ -64,16 +75,7 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
         false,
     ) {
         Err(e) if e.to_string() == "another writer is using this graph" => {
-            let lock = db_path.with_file_name("write.lock");
-            let pid = std::fs::read_to_string(&lock)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok());
-            let holder = pid.map_or_else(|| "another process".into(), |n| format!("PID {n}"));
-            return Ok(
-                json!({"status":"contended","skipped":true,"build_type":"none","holder_pid":pid,"lock_path":lock,
-                "files_parsed":0,"files_updated":0,"total_nodes":0,"total_edges":0,"errors":[],
-                "summary":format!("Another code-review-graph write is already running for this repository ({holder}); skipped instead of repeating the work. Pass wait_for_lock=True (CLI: --wait) to block until it finishes.")}),
-            );
+            return Ok(contended(&db_path, "skipped instead of repeating the work"));
         }
         other => other?,
     };
@@ -155,4 +157,193 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
         report["repaired_interrupted_build"] = result.interrupted.into();
     }
     Ok(report)
+}
+
+const ABSENT_EMBEDDINGS: &str = "Embedding refresh skipped: this graph has no embeddings yet. Run `code-review-graph embed` (MCP: embed_graph_tool) once with the same provider and model to create them.";
+const INCOMPLETE: &str = "The last build stopped before every file was stored, so the graph is still incomplete. Post-processing rebuilt what it could from the stored nodes; run 'code-review-graph build' to finish the graph itself.";
+
+pub(super) fn postprocess(
+    root: &Path,
+    db: &Path,
+    args: &Value,
+    wait: bool,
+    verbose: bool,
+) -> Result<Value> {
+    let included = |name: &str| args[name].as_bool().unwrap_or(true);
+    let result = match canonical::postprocess::rerun(
+        db,
+        root,
+        included("flows"),
+        included("communities"),
+        included("fts"),
+        wait,
+    ) {
+        Err(e) if e.to_string() == "another writer is using this graph" => {
+            return Ok(contended(db, "skipped instead of repeating the work"));
+        }
+        other => other?,
+    };
+    let post = result.computed;
+    let mut report = json!({"status":"ok","bare_edges_resolved":post.bare_edges_resolved,"cpp_scoped_edges_resolved":post.cpp_scoped_edges_resolved,"signatures_updated":true});
+    if verbose && result.new_db {
+        eprintln!("INFO: Created graph database (schema v15).");
+    }
+    if included("fts") {
+        report["fts_indexed"] = post.fts_indexed.into();
+        if verbose {
+            eprintln!("INFO: FTS index rebuilt: {} rows indexed", post.fts_indexed);
+        }
+    }
+    if included("flows") {
+        report["flows_detected"] = post.flows_detected.into();
+    }
+    if included("communities") {
+        report["communities_detected"] = post.communities_detected.into();
+        if verbose {
+            eprintln!(
+                "INFO: Tip: pip install \"code-review-graph[communities]\" for finer communities (grouping by file for now)."
+            );
+        }
+    }
+    let mut warnings = Vec::new();
+    match (
+        args["embedding_model"].as_str(),
+        args["embedding_provider"].as_str(),
+    ) {
+        (None, None) => {}
+        (Some(_), Some(_)) => {
+            let conn = store::open(db)?;
+            let embedded = store::embedding_count(&conn)? > 0;
+            if embedded {
+                warnings
+                    .push("Embedding refresh requires a provider supported by the native binary.");
+            } else {
+                report["embeddings_refresh_skipped"] = true.into();
+                warnings.push(ABSENT_EMBEDDINGS);
+            }
+        }
+        _ => warnings.push("Embedding refresh requires both an explicit provider and model."),
+    }
+    if result.incomplete {
+        warnings.push(INCOMPLETE);
+        report["build_incomplete"] = true.into();
+        report["status"] = "partial".into();
+        report["summary"] = "Post-processing ran, but the graph is missing files from an unfinished build. Run a full build to repair it.".into();
+    } else {
+        report["summary"] = "Post-processing complete.".into();
+    }
+    if !warnings.is_empty() {
+        if verbose {
+            for warning in &warnings {
+                eprintln!("WARNING: {warning}");
+            }
+        }
+        report["warnings"] = json!(warnings);
+    }
+    Ok(report)
+}
+
+pub(super) fn postprocess_cli(root: &Path, db: &Path, args: &Value, wait: bool) -> Result<()> {
+    let report = postprocess(root, db, args, wait, true)?;
+    if report["status"] == "contended" {
+        eprintln!(
+            "Skipped: {}",
+            report["summary"].as_str().unwrap_or_default()
+        );
+        std::process::exit(75);
+    }
+    let mut parts = Vec::new();
+    for (field, label) in [
+        ("flows_detected", "flows"),
+        ("communities_detected", "communities"),
+        ("fts_indexed", "FTS entries"),
+    ] {
+        if let Some(n) = report[field].as_u64().filter(|v| *v > 0) {
+            parts.push(format!("{n} {label}"));
+        }
+    }
+    println!(
+        "Post-processing: {}",
+        if parts.is_empty() {
+            "done".to_owned()
+        } else {
+            parts.join(", ")
+        }
+    );
+    if report["build_incomplete"] == true {
+        println!(
+            "Build state: INCOMPLETE - the last build stopped before every file was stored, so files are still missing from the graph. Post-processing cannot add them. Run 'code-review-graph build' to rebuild."
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn forget_cli(
+    root: &Path,
+    path: &Path,
+    patterns: &[String],
+    preview: bool,
+    wait: bool,
+) -> Result<()> {
+    let outcome = match canonical::forget::run(root, path, patterns, preview, wait) {
+        Err(e) if e.to_string() == "another writer is using this graph" => {
+            let result = contended(path, "nothing was forgotten");
+            eprintln!(
+                "Skipped: {}",
+                result["summary"].as_str().unwrap_or_default()
+            );
+            std::process::exit(75);
+        }
+        other => other?,
+    };
+    if outcome.files.is_empty() {
+        println!(
+            "No parsed files matched the given path(s).\nThe graph currently tracks {} file(s).",
+            outcome.tracked
+        );
+        return Ok(());
+    }
+    println!(
+        "{}",
+        if preview {
+            "[dry-run] Would forget these files:"
+        } else {
+            "Forgetting these files:"
+        }
+    );
+    for name in &outcome.files {
+        let file = Path::new(name);
+        println!("  {}", file.strip_prefix(root).unwrap_or(file).display());
+    }
+    if preview {
+        println!(
+            "\n[dry-run] {} file(s) would be removed from the graph. No changes made.",
+            outcome.files.len()
+        );
+    } else {
+        if outcome.reparsed > 0 {
+            println!(
+                "  re-resolved {} referring file(s) so no edges dangle",
+                outcome.reparsed
+            );
+        }
+        println!(
+            "\nForgot {} file(s); {} file(s) remain in the graph.",
+            outcome.files.len(),
+            outcome.tracked - outcome.files.len()
+        );
+        if let Some(post) = outcome.derived {
+            match post.fts_delta {
+                Some((a, b)) if a + b > 0 => {
+                    eprintln!("INFO: FTS index delta: {a} entries removed, {b} indexed")
+                }
+                None => eprintln!("INFO: FTS index rebuilt: {} rows indexed", post.fts_indexed),
+                _ => {}
+            }
+            eprintln!(
+                "INFO: Tip: pip install \"code-review-graph[communities]\" for finer communities (grouping by file for now)."
+            );
+        }
+    }
+    Ok(())
 }

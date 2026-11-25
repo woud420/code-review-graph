@@ -4,5 +4,6 @@ pub mod graph;
 pub mod mcp;
 pub mod model;
 mod parser;
+pub use parser::parse_file;
 pub mod registry;
 mod tsconfig;

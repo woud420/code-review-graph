@@ -1,10 +1,14 @@
 #[cfg(test)]
 mod cache_upgrade;
+mod csharp;
 mod docs;
 mod evidence;
+pub mod forget;
+mod hcl;
 mod imports;
 pub mod postprocess;
 mod source;
+mod yaml;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -36,6 +40,24 @@ pub struct IndexReport {
 }
 
 const INDEX_VERSION: &str = "2";
+
+pub fn ensure_writable(path: &Path) -> Result<()> {
+    let read_only = std::env::var("CRG_READ_ONLY").is_ok_and(|s| {
+        matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
+    if read_only {
+        ensure!(
+            path.is_file(),
+            "Error: No graph found at {}. Run `code-review-graph build` first.",
+            path.display()
+        );
+        anyhow::bail!("attempt to write a readonly database");
+    }
+    Ok(())
+}
 
 struct WriteLock(File);
 
@@ -122,6 +144,7 @@ pub fn index(
     level: postprocess::Level,
     wait: bool,
 ) -> Result<IndexReport> {
+    ensure_writable(path)?;
     let root = root.canonicalize()?;
     let dir = path.parent().context("missing graph directory")?;
     fs::create_dir_all(dir)?;
@@ -147,7 +170,7 @@ pub fn index(
             let other_language: Option<String> = tx
                 .query_row(
                     "SELECT language FROM nodes WHERE kind='File' AND coalesce(language,'') NOT IN
-                ('python','rust','javascript','typescript','tsx','bash','json') LIMIT 1",
+                ('python','rust','javascript','typescript','tsx','bash','json','go','c','cpp','sql','hcl','ruby','yaml','java','csharp','solidity','lua','luau','php') LIMIT 1",
                     [],
                     |r| r.get(0),
                 )
@@ -205,26 +228,40 @@ pub fn index(
                 .is_some()
             }));
     let mut graph = Graph::open(&path.with_extension("rust-cache"))?;
-    graph.sync(&root, full)?;
+    let omitted = forget::unchanged_omissions(&tx, &root, full)?;
+    graph.sync_matching(&root, full, |file| !omitted.contains(file))?;
     let staging = graph.connection();
     let files: BTreeMap<String, (String, String)> = staging
-        .prepare("SELECT path,hash,facts FROM files ORDER BY path")?
+        .prepare(
+            "SELECT path,hash,facts FROM files
+            WHERE (path NOT GLOB '*.yaml' AND path NOT GLOB '*.yml')
+               OR length(json_extract(facts,'$.yaml.language')) > 0 ORDER BY path",
+        )?
         .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
         .collect::<rusqlite::Result<_>>()?;
     let paths: BTreeSet<_> = files.keys().cloned().collect();
     let ts_paths = crate::tsconfig::TsPaths::load(&root, paths.iter());
     let writer = Writer {
+        hcl: hcl::Modules::load(&root, staging)?,
         ts_paths,
         staging,
         root: &root,
         paths: &paths,
     };
     let mut manifest = blake3::Hasher::new();
-    for (path, (hash, _)) in &files {
+    for (path, (hash, facts)) in &files {
         manifest
             .update(path.as_bytes())
             .update(&[0])
             .update(hash.as_bytes());
+        // A dbt project can change a model without changing its SQL source bytes.
+        if Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(crate::parser::sql::supports)
+        {
+            manifest.update(blake3::hash(facts.as_bytes()).as_bytes());
+        }
     }
     let manifest = manifest.finalize().to_hex().to_string();
     let mut changed_files = Vec::new();
@@ -319,6 +356,15 @@ struct NodeRow<'a> {
     extra: Option<&'a serde_json::Value>,
 }
 
+fn semantic_base(identity: &str) -> &str {
+    static SUFFIX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r":S[0-9a-f]{12}(?::(?:[2-9]|[1-9][0-9]+))?$").unwrap()
+    });
+    SUFFIX
+        .find(identity)
+        .map_or(identity, |suffix| &identity[..suffix.start()])
+}
+
 fn write_node(
     tx: &Transaction<'_>,
     path: &str,
@@ -354,7 +400,7 @@ fn write_node(
         WHERE nodes.file_hash!=excluded.file_hash")?
         .execute(params![node.kind,node.name,node.qualified,path,node.start as i64,node.end as i64,language,node.parent,
             declaration.params,declaration.returns,declaration.modifiers,node.test_file || node.kind=="Test",hash,extra,
-            node.qualified.split_once("::").map_or(node.qualified,|(_,s)|s.split_once(":S").map_or(s, |(base,_)| base)),doc,index_tokens(node.name,node.kind,path,node.parent)])?;
+            node.qualified.split_once("::").map_or(node.qualified,|(_,s)|semantic_base(s)),doc,index_tokens(node.name,node.kind,path,node.parent)])?;
     Ok(())
 }
 
@@ -426,10 +472,28 @@ fn import_edge(
 }
 
 struct Writer<'a> {
+    hcl: hcl::Modules,
     ts_paths: crate::tsconfig::TsPaths,
     staging: &'a Connection,
     root: &'a Path,
     paths: &'a BTreeSet<String>,
+}
+
+fn begin_edges(tx: &Transaction) -> Result<()> {
+    tx.execute_batch("CREATE TEMP TABLE affected(file TEXT PRIMARY KEY);
+            CREATE TEMP TABLE imported(kind TEXT,source TEXT,target TEXT,path TEXT,line INTEGER,resolution TEXT,extra TEXT DEFAULT '{}',
+                PRIMARY KEY(kind,source,target,path,line))")?;
+    Ok(())
+}
+
+fn replace_edges(tx: &Transaction) -> Result<()> {
+    tx.execute_batch("DELETE FROM edges WHERE file_path IN (SELECT file FROM affected);
+            INSERT OR IGNORE INTO imported(kind,source,target,path,line,extra)
+                SELECT 'TESTED_BY',e.target,e.source,e.path,e.line,e.extra FROM imported e
+                JOIN nodes n ON n.qualified_name=e.source WHERE e.kind='CALLS' AND n.kind='Test';
+            INSERT INTO edges(kind,source_qualified,target_qualified,file_path,line,target_resolution,extra,updated_at)
+                SELECT kind,source,target,path,line,resolution,extra,unixepoch('subsec') FROM imported ORDER BY rowid")?;
+    Ok(())
 }
 
 impl Writer<'_> {
@@ -439,12 +503,10 @@ impl Writer<'_> {
         files: &BTreeMap<String, (String, String)>,
         full: bool,
     ) -> Result<(usize, usize)> {
-        tx.execute_batch("CREATE TEMP TABLE affected(file TEXT PRIMARY KEY);
-            CREATE TEMP TABLE imported(kind TEXT,source TEXT,target TEXT,path TEXT,line INTEGER,resolution TEXT,extra TEXT DEFAULT '{}',
-                PRIMARY KEY(kind,source,target,path,line))")?;
+        begin_edges(tx)?;
         let mut old = file_hashes(tx)?;
         let mut digests = BTreeMap::new();
-        for (relative, (hash, _)) in files {
+        for (relative, (hash, facts)) in files {
             let absolute = self.root.join(relative);
             let path = absolute.to_str().context("non UTF-8 repository path")?;
             let data = fs::read(&absolute)?;
@@ -453,7 +515,26 @@ impl Writer<'_> {
                 "source changed while indexing: {relative}"
             );
             let sha = hex::encode(Sha256::digest(&data));
-            if old.remove(path).as_ref() != Some(&sha) || full {
+            let unchanged = old.remove(path).as_ref() == Some(&sha);
+            let dbt_changed = if !full
+                && unchanged
+                && absolute
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(crate::parser::sql::supports)
+            {
+                let facts: ParsedFile = serde_json::from_str(facts)?;
+                let is_model = facts
+                    .sql
+                    .declarations
+                    .values()
+                    .any(|d| d.extra["sql_kind"] == "dbt_model");
+                let was_model = tx.query_row("SELECT EXISTS(SELECT 1 FROM nodes WHERE file_path=? AND json_extract(extra,'$.sql_kind')='dbt_model')",[path], |r| r.get::<_,bool>(0))?;
+                is_model != was_model
+            } else {
+                false
+            };
+            if !unchanged || full || dbt_changed {
                 tx.execute("INSERT INTO affected VALUES(?)", [path])?;
                 tx.execute("DELETE FROM nodes WHERE file_path=?", [path])?;
             }
@@ -474,6 +555,15 @@ impl Writer<'_> {
             tx.execute_batch("INSERT OR IGNORE INTO affected
                 SELECT file_path FROM nodes WHERE kind='File' AND language IN ('typescript','tsx','javascript')
                 AND EXISTS(SELECT 1 FROM original_changes WHERE file LIKE '%/tsconfig.json' OR file LIKE '%/jsconfig.json')")?;
+        }
+        if !full {
+            self.hcl.affected(tx)?;
+            tx.execute_batch(
+                "INSERT OR IGNORE INTO affected SELECT DISTINCT e.file_path FROM edges e
+                JOIN nodes n ON n.qualified_name=e.file_path AND n.language='ruby'
+                WHERE EXISTS (SELECT 1 FROM original_changes WHERE file GLOB '*.rb')
+                  AND (e.kind='IMPORTS_FROM' OR json_extract(e.extra,'$.receiver_constant')=1)",
+            )?;
         }
         let affected: Vec<String> = tx
             .prepare("SELECT file FROM affected ORDER BY file")?
@@ -503,12 +593,10 @@ impl Writer<'_> {
             }
             self.materialize_file(tx, relative, &facts, &source, &digests[relative], &returns)?;
         }
-        tx.execute_batch("DELETE FROM edges WHERE file_path IN (SELECT file FROM affected);
-            INSERT OR IGNORE INTO imported(kind,source,target,path,line,extra)
-                SELECT 'TESTED_BY',e.target,e.source,e.path,e.line,e.extra FROM imported e
-                JOIN nodes n ON n.qualified_name=e.source WHERE e.kind='CALLS' AND n.kind='Test';
-            INSERT INTO edges(kind,source_qualified,target_qualified,file_path,line,target_resolution,extra,updated_at)
-                SELECT kind,source,target,path,line,resolution,extra,unixepoch('subsec') FROM imported ORDER BY rowid")?;
+        replace_edges(tx)?;
+        if !full {
+            csharp::rebind(tx, self.staging, self.root)?;
+        }
         Ok((if full { files.len() } else { affected.len() }, deleted))
     }
 
@@ -522,6 +610,7 @@ impl Writer<'_> {
         returns: &evidence::ReturnIndex,
     ) -> Result<()> {
         let Self {
+            hcl,
             staging,
             root,
             paths,
@@ -530,6 +619,13 @@ impl Writer<'_> {
         let test_file = crate::model::test_file(relative, root.to_str());
         let full_path = root.join(relative);
         let path = full_path.to_str().context("non UTF-8 path")?;
+        if source.language == "hcl" {
+            hcl::declarations(tx, path, sha, source.lines, test_file, facts)?;
+            return hcl.edges(tx, path, &facts.hcl);
+        }
+        if source.language == "yaml" {
+            return yaml::materialize(tx, path, sha, source.lines, test_file, facts);
+        }
         write_node(
             tx,
             path,
@@ -544,15 +640,16 @@ impl Writer<'_> {
                 start: 1,
                 end: source.lines,
                 declaration: None,
-                extra: Some(&facts.json.file),
+                extra: Some(if !facts.syntax.file.is_null() {
+                    &facts.syntax.file
+                } else {
+                    &facts.json.file
+                }),
             },
         )?;
         for symbol in &facts.symbols {
             let qn = qualified(path, &symbol.name);
-            let identity = symbol
-                .name
-                .split_once(":S")
-                .map_or(symbol.name.as_str(), |(s, _)| s);
+            let identity = semantic_base(&symbol.name);
             let (parent, name) = identity
                 .rsplit_once('.')
                 .map_or((None, identity), |(p, n)| (Some(p), n));
@@ -569,6 +666,23 @@ impl Writer<'_> {
                 .find(|d| d.identity == symbol.name && d.start == symbol.start_line);
             let (parent, name) =
                 cc.map_or((parent, name), |d| (d.parent.as_deref(), d.name.as_str()));
+            let sql = facts.sql.declarations.get(&symbol.name);
+            let (parent, name) =
+                sql.map_or((parent, name), |d| (d.parent.as_deref(), d.name.as_str()));
+            let ruby = facts.ruby.names.get(&symbol.name);
+            let (parent, name) =
+                ruby.map_or((parent, name), |r| (r.parent.as_deref(), r.name.as_str()));
+            let syntax = facts.syntax.declarations.get(&symbol.name);
+            let syntax_decl = syntax.map(|d| Declaration {
+                params: d.params.clone(),
+                doc: d.doc.clone(),
+                decorators: d.decorators.clone(),
+                modifiers: d
+                    .modifiers
+                    .clone()
+                    .or_else(|| (!d.decorators.is_empty()).then(|| d.decorators.join(","))),
+                returns: d.returns.clone(),
+            });
             let c_decl = cc.map(|d| Declaration {
                 params: d.params.clone(),
                 doc: d.doc.clone(),
@@ -607,15 +721,20 @@ impl Writer<'_> {
                     declaration: c_decl
                         .as_ref()
                         .or(go_declaration.as_ref())
+                        .or(syntax_decl.as_ref())
                         .or(enriched.as_ref())
                         .or(details),
                     extra: go
                         .map(|d| &d.extra)
+                        .or_else(|| sql.map(|d| &d.extra))
+                        .or_else(|| syntax.map(|d| &d.extra))
                         .or_else(|| json.map(|p| &p.extra))
                         .or_else(|| facts.typescript.kinds.get(&symbol.name)),
                 },
             )?;
-            let container = if let Some(c) = cc {
+            let container = if let Some(r) = ruby {
+                Some(r.container.as_str())
+            } else if let Some(c) = cc {
                 c.container.as_deref()
             } else {
                 json.and_then(|p| p.parent.as_deref())
@@ -628,7 +747,13 @@ impl Writer<'_> {
                     })
                     .or(parent)
             }
-            .filter(|_| !(source.language == "python" && symbol.kind == "Class"))
+            .filter(|p| {
+                !(symbol.kind == "Class"
+                    && (source.language == "python"
+                        || (source.language == "csharp"
+                            && syntax.and_then(|d| d.extra["csharp_namespace"].as_str())
+                                == Some(*p))))
+            })
             .map(|p| qualified(path, p))
             .unwrap_or_else(|| path.to_owned());
             edge(
@@ -675,8 +800,28 @@ impl Writer<'_> {
                 &serde_json::json!({}),
             )?;
         }
+        for (form, module, line) in &facts.ruby.imports {
+            let (target, extra) =
+                crate::parser::ruby::imports::resolve(root, relative, form, module, paths);
+            import_edge(tx, path, &target, *line, &extra)?;
+        }
+        for e in &facts.syntax.edges {
+            let php = (source.language == "php" && e.kind == "IMPORTS_FROM")
+                .then(|| {
+                    crate::parser::php::imports::local_file(root, relative, &e.target, |p| {
+                        paths.contains(p)
+                    })
+                })
+                .flatten()
+                .map(|f| root.join(f).to_string_lossy().into_owned());
+            tx.prepare_cached("INSERT INTO imported(kind,source,target,path,line,extra) VALUES(?,?,?,?,?,?) ON CONFLICT(kind,source,target,path,line) DO UPDATE SET extra=excluded.extra")?
+                .execute(params![e.kind, qualified(path,&e.owner), php.as_deref().unwrap_or(&e.target), path, e.line as i64, e.extra.to_string()])?;
+        }
         for (line, module) in &facts.cfamily.imports {
             edge(tx, "IMPORTS_FROM", path, module, path, *line, None)?;
+        }
+        for (line, table) in &facts.sql.tables {
+            edge(tx, "IMPORTS_FROM", path, table, path, *line, None)?;
         }
         for (line, module) in &facts.go.imports {
             let target = crate::parser::go::package_dir(root, relative, module, paths);
@@ -741,6 +886,10 @@ impl Writer<'_> {
         )?;
         let mut rows = stmt.query([relative])?;
         while let Some(row) = rows.next()? {
+            // Oracle routine calls are stored as bare candidates and ranked during postprocessing.
+            if source.language == "sql" {
+                break;
+            }
             let caller: String = row.get(0)?;
             let raw: String = row.get(1)?;
             let line = usize::try_from(row.get::<_, i64>(2)?)?;
@@ -773,6 +922,7 @@ impl Writer<'_> {
                 if let Some((_, target)) = &claim {
                     extra["claimed_endpoint"] = serde_json::json!(target);
                 }
+                let bare = extra["csharp_raw_target"].as_str().unwrap_or(bare);
                 write_call.execute(params![
                     qualified(path, &call.caller),
                     bare,

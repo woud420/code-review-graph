@@ -366,6 +366,15 @@ pub(super) fn ranked(
     options: &Options,
     window: i64,
 ) -> Result<(&'static str, Vec<Value>)> {
+    let (mode, rows) = ranked_with_ids(conn, root, options, window)?;
+    Ok((mode, rows.into_iter().map(|(_, node)| node).collect()))
+}
+pub(super) fn ranked_with_ids(
+    conn: &Connection,
+    root: &Path,
+    options: &Options,
+    window: i64,
+) -> Result<(&'static str, Vec<(i64, Value)>)> {
     let query = &options.query;
     if query.trim().is_empty() {
         return Ok(("none", vec![]));
@@ -420,7 +429,7 @@ pub(super) fn ranked(
             node[key] = json!(clean(node[key].as_str().unwrap_or_default(), 256));
         }
         node["score"] = json!((score * 1e6).round_ties_even() / 1e6);
-        results.push((score, node));
+        results.push((score, (id, node)));
     }
     results.sort_by(|a, b| b.0.total_cmp(&a.0));
     Ok((

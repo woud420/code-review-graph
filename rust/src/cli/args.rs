@@ -82,6 +82,52 @@ pub enum Command {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Export a graph visualization.
+    Visualize {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long,default_value="auto",value_parser=["auto","full","community","file"])]
+        mode: String,
+        #[arg(long,default_value="html",value_parser=["html","json","graphml"])]
+        format: String,
+        #[arg(long)]
+        sidecar: bool,
+    },
+    /// Generate Markdown pages for graph communities.
+    Wiki {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove indexed files and recompute their relationships.
+    Forget {
+        #[command(flatten)]
+        location: Location,
+        #[arg(required = true, num_args=1..)]
+        paths: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Run post-processing on the stored graph.
+    Postprocess {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long)]
+        no_flows: bool,
+        #[arg(long)]
+        no_communities: bool,
+        #[arg(long)]
+        no_fts: bool,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, value_parser = ["local","openai","google","minimax","voyage"])]
+        embedding_provider: Option<String>,
+        #[arg(long)]
+        embedding_model: Option<String>,
+    },
     /// Full raw graph build.
     Build(Write),
     /// Incrementally update the raw graph.
@@ -95,6 +141,56 @@ pub enum Command {
         limit: i64,
         #[arg(long)]
         repo: Option<PathBuf>,
+    },
+    /// Find symbols without callers or test references.
+    DeadCode {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long, value_parser=["Function","Class"])]
+        kind: Option<String>,
+        #[arg(long)]
+        file_pattern: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate a report from evaluation results.
+    Eval {
+        #[arg(long)]
+        report: bool,
+        #[arg(long, default_value = "evaluate/results")]
+        output_dir: PathBuf,
+    },
+    /// Preview graph-backed refactors.
+    Refactor {
+        #[arg(value_parser=["rename","dead_code","suggest"])]
+        mode: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        old_name: Option<String>,
+        #[arg(long)]
+        new_name: Option<String>,
+        #[arg(long,value_parser=["Function","Class"])]
+        kind: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Analyse change impact against the stored graph.
+    DetectChanges {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, default_value = "HEAD~1")]
+        base: String,
+        #[arg(long)]
+        brief: bool,
+        #[arg(long)]
+        churn: bool,
+        #[arg(long)]
+        verify: bool,
+        #[arg(long)]
+        details: Option<String>,
     },
     /// Analyse the blast radius of changes.
     Impact {
@@ -180,6 +276,8 @@ pub enum Command {
     Serve {
         #[arg(long)]
         repo: Option<PathBuf>,
+        #[arg(long)]
+        tools: Option<String>,
     },
 }
 

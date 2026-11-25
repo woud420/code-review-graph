@@ -1,4 +1,4 @@
-mod risk;
+pub(super) mod risk;
 mod source;
 
 use super::{

@@ -1,15 +1,16 @@
 mod args;
 mod build;
 mod changes;
+mod eval;
 mod history;
 mod mcp;
-mod prompts;
 mod query;
 mod registry;
 mod reports;
 mod search;
 mod store;
-mod terms;
+use query::terms;
+mod visualize;
 mod wiki;
 mod wire;
 
@@ -51,6 +52,53 @@ pub fn dispatch() -> Result<()> {
         return Ok(());
     };
     match command {
+        Command::Eval { report, output_dir } => {
+            if report {
+                eval::report(&output_dir)
+            } else {
+                println!("Specify --all, --repo, or --benchmark. See --help.");
+                Ok(())
+            }
+        }
+        Command::DeadCode {
+            location,
+            kind,
+            file_pattern,
+            limit,
+            json,
+        } => {
+            let given = root(location.repo.as_deref(), false)?;
+            let root = store::project_root(&given).unwrap_or(given);
+            let db = store::database(&root, location.data_dir.as_deref());
+            let conn = store::open(&db)?;
+            store::check_root(&conn, &db, &root)?;
+            let mut items = reports::dead_code(
+                &conn,
+                &root,
+                kind.as_deref().unwrap_or(""),
+                file_pattern.as_deref().unwrap_or(""),
+            )?;
+            let total = items.len();
+            eprintln!("INFO: find_dead_code: found {total} dead symbols");
+            if limit > 0 {
+                items.truncate(limit);
+            }
+            if json {
+                println!("{}", wire::json_text(&items.into(), true));
+            } else {
+                println!("Dead code: {total} item(s); showing {}", items.len());
+                for row in &items {
+                    println!(
+                        "  [{}] {}  ({}:{})",
+                        query::text(row, "kind"),
+                        query::text(row, "name"),
+                        query::text(row, "relative_path"),
+                        row["line"]
+                    );
+                }
+            }
+            Ok(())
+        }
         Command::ContextHistory {
             location,
             by,
@@ -136,6 +184,51 @@ pub fn dispatch() -> Result<()> {
             println!("{}", wire::json_text(&data, true));
             Ok(())
         }
+        Command::Refactor {
+            mode,
+            repo,
+            old_name,
+            new_name,
+            kind,
+            path,
+        } => {
+            if mode == "rename"
+                && (old_name.as_deref().unwrap_or("").is_empty()
+                    || new_name.as_deref().unwrap_or("").is_empty())
+            {
+                eprintln!(
+                    "usage: code-review-graph refactor [-h] [--old-name OLD_NAME]\n                                  [--new-name NEW_NAME]\n                                  [--kind {{Function,Class}}] [--path PATH]\n                                  [--repo REPO]\n                                  {{rename,dead_code,suggest}}\ncode-review-graph refactor: error: rename requires --old-name and --new-name"
+                );
+                std::process::exit(2);
+            }
+            print_report(
+                repo.as_deref(),
+                "refactor_tool",
+                serde_json::json!({"mode":mode,"old_name":old_name,"new_name":new_name,"kind":kind,"file_pattern":path}),
+            )
+        }
+        Command::DetectChanges {
+            repo,
+            base,
+            brief,
+            churn,
+            verify,
+            details,
+        } => {
+            let root = root(repo.as_deref(), false)?;
+            let db = store::database(&root, None);
+            let conn = store::open(&db)?;
+            store::check_root(&conn, &db, &root)?;
+            reports::detect::print(
+                &conn,
+                &root,
+                &base,
+                brief,
+                churn,
+                verify,
+                details.as_deref(),
+            )
+        }
         Command::Impact {
             repo,
             files,
@@ -204,10 +297,73 @@ pub fn dispatch() -> Result<()> {
             "get_community_tool",
             serde_json::json!({"community_id":id,"community_name":name,"include_members":members}),
         ),
-        Command::Serve { repo } => mcp::serve(&root(repo.as_deref(), false)?),
+        Command::Serve { repo, tools } => mcp::serve(&root(repo.as_deref(), false)?, tools),
+        Command::Visualize {
+            location,
+            mode,
+            format,
+            sidecar,
+        } => {
+            let root = root(location.repo.as_deref(), false)?;
+            let db = store::database(&root, location.data_dir.as_deref());
+            let conn = store::open(&db)?;
+            store::check_root(&conn, &db, &root)?;
+            visualize::write(&conn, &db, &format, &mode, sidecar)
+        }
+        Command::Wiki { location, force } => {
+            let root = root(location.repo.as_deref(), false)?;
+            let db = store::database(&root, location.data_dir.as_deref());
+            let conn = store::open(&db)?;
+            store::check_root(&conn, &db, &root)?;
+            let response = wiki::write(&conn, &db, force)?;
+            println!(
+                "Wiki: {}",
+                response["summary"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim_start_matches("Wiki generated: ")
+            );
+            println!("Output: {}", db.with_file_name("wiki").display());
+            Ok(())
+        }
+        Command::Forget {
+            location,
+            paths,
+            dry_run,
+            wait,
+        } => {
+            let root = root(location.repo.as_deref(), false)?;
+            let path = store::database(&root, location.data_dir.as_deref());
+            build::forget_cli(&root, &path, &paths, dry_run, wait)
+        }
+        Command::Postprocess {
+            location,
+            no_flows,
+            no_communities,
+            no_fts,
+            wait,
+            embedding_provider,
+            embedding_model,
+        } => {
+            if embedding_provider.is_some() != embedding_model.is_some() {
+                eprintln!(
+                    "usage: code-review-graph [-h] [-v] <command> ...\ncode-review-graph: error: --embedding-provider and --embedding-model must be supplied together"
+                );
+                std::process::exit(2);
+            }
+            let root = root(location.repo.as_deref(), false)?;
+            let path = write_path(&root, location.data_dir.as_deref())?;
+            let args = serde_json::json!({"flows":!no_flows,"communities":!no_communities,"fts":!no_fts,"embedding_provider":embedding_provider,"embedding_model":embedding_model});
+            build::postprocess_cli(&root, &path, &args, wait)
+        }
         Command::Build(ref args) | Command::Update(ref args) => {
             let full = matches!(command, Command::Build(_));
             let root = root(args.location.repo.as_deref(), false)?;
+            if !full && args.location.repo.is_none() && store::project_root(&root).is_none() {
+                eprintln!("ERROR: Not in a git repository. 'update' requires git for diffing.");
+                eprintln!("ERROR: Use 'build' for a full parse, or run 'git init' first.");
+                std::process::exit(1);
+            }
             ensure!(
                 root.is_dir(),
                 "Error: --repo is not a folder: {}. Check the path and try again.",
@@ -221,7 +377,7 @@ pub fn dispatch() -> Result<()> {
             } else {
                 (Level::Full, "full")
             };
-            let db = store::database(&root, args.location.data_dir.as_deref());
+            let db = write_path(&root, args.location.data_dir.as_deref())?;
             let new_db = !db.exists();
             let report = match canonical::index(&root, &db, full, level, args.wait) {
                 Err(error)
@@ -330,6 +486,28 @@ pub fn dispatch() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn write_path(root: &Path, dir: Option<&Path>) -> Result<PathBuf> {
+    ensure!(
+        root.is_dir(),
+        "Error: --repo is not a folder: {}. Check the path and try again.",
+        root.display()
+    );
+    let db = store::database(root, dir);
+    canonical::ensure_writable(&db)?;
+    if let Some(dir) = dir {
+        let dir = absolute(dir)?;
+        code_review_graph_rs::registry::set_data_dir(root, &dir)?;
+        eprintln!("INFO: Graph database will be stored at: {}", dir.display());
+    }
+    if ![".git", ".svn", ".code-review-graph"]
+        .iter()
+        .any(|p| root.join(p).exists())
+    {
+        std::fs::create_dir_all(root.join(".code-review-graph"))?;
+    }
+    Ok(db)
 }
 
 fn print_report(repo: Option<&Path>, name: &str, args: serde_json::Value) -> Result<()> {

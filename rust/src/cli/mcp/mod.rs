@@ -1,4 +1,5 @@
-use super::{prompts, query, registry, reports, search, store, wiki, wire};
+mod prompts;
+use super::{query, registry, reports, search, store, wiki, wire};
 use anyhow::{Result, anyhow};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt, model::*, service::RequestContext,
@@ -21,7 +22,7 @@ fn docs(section: &str, root: &Path) -> Value {
     let override_docs = fs::read(root.join("docs/LLM-OPTIMIZED-REFERENCE.md"))
         .ok()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-    let packaged = include_str!("../../assets/LLM-OPTIMIZED-REFERENCE.md");
+    let packaged = include_str!("../../../assets/LLM-OPTIMIZED-REFERENCE.md");
     let opening = format!("<section name=\"{}\">", section.to_ascii_lowercase());
     for content in override_docs.as_deref().into_iter().chain([packaged]) {
         let lower = content.to_ascii_lowercase();
@@ -55,6 +56,21 @@ fn call(
         None => root.to_owned(),
     };
     let data = Value::Object(args);
+    if name == "apply_refactor_tool" {
+        return with_provenance(
+            hints.apply_refactor(&root, &data)?,
+            &store::database(&root, None),
+            &root,
+        );
+    }
+    if name == "run_postprocess_tool" {
+        let db = store::database(&root, None);
+        return with_provenance(
+            super::build::postprocess(&root, &db, &data, false, false)?,
+            &db,
+            &root,
+        );
+    }
     if name == "build_or_update_graph_tool" {
         return with_provenance(
             super::build::run(&root, &data)?,
@@ -76,11 +92,27 @@ fn call(
             | "query_graph_tool"
             | "semantic_search_nodes_tool"
             | "get_wiki_page_tool"
+            | "generate_wiki_tool"
     ) && !reports::NAMES.contains(&name)
     {
         anyhow::bail!("Unknown tool: '{name}'");
     }
     let db = store::database(&root, None);
+    if name == "get_minimal_context_tool" && !db.is_file() {
+        return Ok(reports::context::not_ready(
+            "missing_graph",
+            "No graph database found. Build the graph before requesting context.",
+        ));
+    }
+    if name == "generate_wiki_tool" {
+        let conn = store::open(&db)?;
+        store::check_root(&conn, &db, &root)?;
+        return attach_provenance(
+            wiki::write(&conn, &db, data["force"].as_bool().unwrap_or(false))?,
+            &conn,
+            &root,
+        );
+    }
     if name == "get_wiki_page_tool" {
         let page = wiki::read(
             &db,
@@ -120,7 +152,7 @@ fn attach_provenance(mut result: Value, conn: &rusqlite::Connection, root: &Path
 
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerConfig {
-        serde_json::from_str(include_str!("../../assets/cli/server.json"))
+        serde_json::from_str(include_str!("../../../assets/cli/server.json"))
             .expect("bundled server information")
     }
     #[allow(
@@ -170,9 +202,13 @@ impl ServerHandler for Server {
         let root = self.root.clone();
         let name = request.name.into_owned();
         let args = request.arguments.unwrap_or_default();
-        if let Some(tool) = self.tools.iter().find(|tool| tool.name == name)
-            && let Some(required) = tool.input_schema.get("required").and_then(Value::as_array)
-        {
+        let Some(tool) = self.tools.iter().find(|tool| tool.name == name) else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "Unknown tool: '{name}'"
+            ))])
+            .into());
+        };
+        if let Some(required) = tool.input_schema.get("required").and_then(Value::as_array) {
             let missing: Vec<_> = required
                 .iter()
                 .filter_map(Value::as_str)
@@ -223,11 +259,25 @@ impl ServerHandler for Server {
     }
 }
 
-pub fn serve(root: &Path) -> Result<()> {
+pub fn serve(root: &Path, filter: Option<String>) -> Result<()> {
+    let mut tools: Vec<Tool> =
+        serde_json::from_str(include_str!("../../../assets/cli/tools.json"))?;
+    let requested = filter
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("CRG_TOOLS").ok())
+        .unwrap_or_default();
+    let names: std::collections::HashSet<_> = requested
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !names.is_empty() {
+        tools.retain(|t| names.contains(t.name.as_ref()));
+    }
     let server = Server {
         root: root.to_owned(),
         hints: Arc::default(),
-        tools: serde_json::from_str(include_str!("../../assets/cli/tools.json"))?,
+        tools,
     };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

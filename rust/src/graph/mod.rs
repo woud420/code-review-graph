@@ -1,3 +1,6 @@
+mod csharp;
+mod csharp_index;
+mod php;
 use crate::model::{BuildReport, Hit, Import, ParsedFile, Stats};
 use crate::parser::parse_file;
 use anyhow::{Context, Result, ensure};
@@ -102,6 +105,15 @@ impl Graph {
     }
 
     pub fn sync(&mut self, root: &Path, rebuild: bool) -> Result<BuildReport> {
+        self.sync_matching(root, rebuild, |_| true)
+    }
+
+    pub(crate) fn sync_matching(
+        &mut self,
+        root: &Path,
+        rebuild: bool,
+        include: impl Fn(&str) -> bool,
+    ) -> Result<BuildReport> {
         let root = fs::canonicalize(root).with_context(|| format!("opening {}", root.display()))?;
         ensure!(root.is_dir(), "repository path must be a directory");
         let root_name = root.to_str().context("repository path is not UTF-8")?;
@@ -134,18 +146,35 @@ impl Graph {
         };
         let mut files_parsed = 0;
         let mut files_unchanged = 0;
-        for file in source_files(&root)? {
+        let mut dbt = crate::parser::sql::dbt::Projects::default();
+        for file in source_files(&root)?.into_iter().filter(|p| include(p)) {
             let bytes = fs::read(root.join(&file)).with_context(|| format!("reading {file}"))?;
             let hash = blake3::hash(&bytes).to_hex().to_string();
             let previous_hash = old.remove(&file);
+            let path = Path::new(&file);
+            let sql = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(crate::parser::sql::supports);
+            let membership = sql.then(|| dbt.membership(&root, path)).flatten();
             if !rebuild && previous_hash.as_deref() == Some(&hash) {
-                files_unchanged += 1;
-                continue;
+                let same_context = !sql || tx.query_row(
+                    "SELECT json_extract(facts,'$.sql.dbt_membership') IS ? FROM files WHERE path=?",
+                    params![membership, file], |r| r.get::<_, bool>(0)
+                )?;
+                if same_context {
+                    files_unchanged += 1;
+                    continue;
+                }
             }
             let source =
                 std::str::from_utf8(&bytes).with_context(|| format!("{file} is not UTF-8"))?;
-            let facts =
-                parse_file(Path::new(&file), source).with_context(|| format!("parsing {file}"))?;
+            let facts = (if sql {
+                crate::parser::sql::parse(path, source, membership)
+            } else {
+                parse_file(path, source)
+            })
+            .with_context(|| format!("parsing {file}"))?;
             store_file(&tx, &file, &hash, &facts, source.lines().count())?;
             files_parsed += 1;
         }
@@ -322,10 +351,16 @@ fn source_files(root: &Path) -> Result<Vec<String>> {
             && !file_name.ends_with(".lock.json")
             && !file_name.ends_with(".min.json");
         if JS_EXTENSIONS.contains(&ext)
-            || matches!(ext, "py" | "rs" | "go")
+            || matches!(
+                ext,
+                "py" | "rs" | "go" | "java" | "cs" | "sol" | "lua" | "luau" | "php"
+            )
             || json
             || crate::parser::cfamily::supports(ext)
             || crate::parser::bash::discover(path)
+            || crate::parser::sql::supports(ext)
+            || matches!(ext, "yaml" | "yml" | "tf" | "hcl" | "rb")
+            || (ext == "properties" && crate::parser::yaml::spring::supports(path))
         {
             let relative = path
                 .strip_prefix(root)?
@@ -411,6 +446,8 @@ fn member_name(binding: &str, suffix: &str) -> Option<String> {
 }
 
 struct Resolver {
+    php: php::Methods,
+    csharp: csharp_index::Bindings,
     ts_paths: crate::tsconfig::TsPaths,
     modules: BTreeMap<String, Module>,
 }
@@ -699,10 +736,32 @@ impl Resolver {
     }
 
     fn resolve(&self, file: &str, caller: &str, name: &str, line: usize) -> Option<Target> {
+        let sql = &self.modules[file].facts.sql;
+        if !sql.declarations.is_empty() {
+            let method = name.rsplit('.').next()?;
+            let mut candidates = sql.declarations.iter().filter(|(_, d)| d.name == method);
+            let (identity, _) = candidates.next()?;
+            return candidates
+                .next()
+                .is_none()
+                .then(|| (file.into(), identity.clone()));
+        }
         if file.ends_with(".rs")
             && let Some((class, method)) = name.rsplit_once("::")
         {
             return self.resolve_binding(file, &format!("{class}.{method}"), line);
+        }
+        if let Some(site) = self.modules[file].facts.syntax.site(caller, name, line) {
+            if file.ends_with(".php") {
+                return self.php_call(file, site);
+            }
+            if file.ends_with(".cs") {
+                return self.csharp_call(file, site);
+            }
+            return site
+                .target
+                .as_ref()
+                .map(|target| (file.into(), target.clone()));
         }
         if let Some(site) = self.modules[file].facts.cfamily.site(caller, name, line) {
             return site.target.as_ref().map(|n| (file.into(), n.clone()));
@@ -881,7 +940,14 @@ fn resolve_graph(tx: &Transaction<'_>) -> Result<()> {
         r.get(0)
     })?;
     let ts_paths = crate::tsconfig::TsPaths::load(Path::new(&root), modules.keys());
-    let mut resolver = Resolver { modules, ts_paths };
+    let csharp = csharp_index::Bindings::collect(Path::new(&root), &modules);
+    let php = php::Methods::collect(Path::new(&root), &modules);
+    let mut resolver = Resolver {
+        php,
+        modules,
+        ts_paths,
+        csharp,
+    };
     let imports: Vec<_> = resolver
         .modules
         .iter()

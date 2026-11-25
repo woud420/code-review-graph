@@ -22,6 +22,14 @@ def wire_reports(command, root, env):
     cases = [(name, dict(args, detail_level=mode))
              for name, args in reports for mode in ("standard", "minimal")]
     cases.append(("get_suggested_questions_tool", {}))
+    cases.extend(("refactor_tool", opts) for opts in (
+        {"mode": "dead_code"}, {"mode": "dead_code", "detail_level": "minimal", "max_results": 1},
+        {"mode": "suggest"}, {"mode": "suggest", "max_results": 1}, {"mode": "invalid"},
+    ))
+    cases.extend(("traverse_graph_tool", opts) for opts in (
+        {"query": "job", "mode": "bfs"}, {"query": "job", "mode": "dfs", "depth": 1},
+        {"query": "job", "token_budget": 5}, {"query": "absent"},
+    ))
     cases.extend(("get_review_context_tool", opts) for opts in (
         {"changed_files": ["go.ts"]}, {"changed_files": ["lib.py"], "include_source": False},
         {"changed_files": ["lib.py"], "max_lines_per_file": 2, "max_results": 1},
@@ -76,11 +84,15 @@ def check(binary, source):
                   ["flows"], ["communities"], ["community", "--id", "1", "--members"]]
         cases.extend(["impact", "--files", changed, "--detail-level", mode, "--max-results", "1"]
                      for changed in ("lib.py", "go.ts", "absent") for mode in ("standard", "minimal", "compact"))
+        cases.extend([["refactor", "dead_code", "--kind", "Function"], ["refactor", "suggest"]])
         for case in cases:
             args = [*case, "--repo", str(root)]
             want = run(reference + args, root, ref_env)
             got = run([str(binary), *args], root, env)
             assert want == got, (case, want, got)
+            if case == ["refactor", "dead_code", "--kind", "Function"]:
+                dead = {n["name"] for n in json.loads(want["stdout"])["dead_code"]}
+                assert "client" in dead and "job" not in dead and "service" not in dead, dead
             if case == ["query", "tests_for", "forward"]:
                 rows = json.loads(want["stdout"])["results"]
                 assert {(n["name"], n["indirect"]) for n in rows} == {("test_forward", False), ("test_job", True)}, rows

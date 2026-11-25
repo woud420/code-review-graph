@@ -1,4 +1,6 @@
+mod generate;
 use anyhow::{Result, ensure};
+pub(super) use generate::write;
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 use unicode_normalization::UnicodeNormalization;

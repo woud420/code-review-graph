@@ -1,4 +1,4 @@
-"""Compare public graph output for the pinned Rust, TypeScript/TSX and shell fixtures."""
+"""Compare public graph output for the pinned Rust, TypeScript/TSX, shell, SQL, YAML, Terraform and Ruby fixtures."""
 import argparse
 import hashlib
 import os
@@ -11,8 +11,8 @@ from canonical_parity import read_graph
 from differential import new_repo, verify_source
 
 
-EXTENSIONS = {".rs", ".js", ".jsx", ".ts", ".tsx", ".sh", ".bash", ".zsh", ".ksh"}
-FIXTURES_SHA256 = "c79b5f9ea97891ce0a0209f18fc1fe1be1fe6190b8783dcf453ddb0c0c5b7647"
+EXTENSIONS = {".rs", ".js", ".jsx", ".ts", ".tsx", ".sh", ".bash", ".zsh", ".ksh", ".sql", ".yml", ".yaml", ".tf", ".hcl", ".rb"}
+FIXTURES_SHA256 = "01f97cbd3ef165b91124fb2feffc0f95af81a0703fafb13802ea87ed00fdcd4a"
 
 
 def compare(directory, upstream, binary):

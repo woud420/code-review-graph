@@ -1,8 +1,13 @@
 mod affected;
 mod analysis;
 mod architecture;
+pub(super) mod context;
+pub(super) mod detect;
 mod impact;
+mod refactor;
+pub(super) use refactor::dead_code;
 mod review;
+mod traverse;
 use super::query::{clean, node, subset, text};
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -106,6 +111,7 @@ pub fn large(conn: &Connection, root: &Path, args: &Value) -> Result<Value> {
 
 #[derive(Default)]
 pub struct Hints {
+    refactors: refactor::apply::Pending,
     state: Mutex<HintState>,
 }
 #[derive(Default)]
@@ -114,6 +120,15 @@ struct HintState {
     touched: std::collections::HashSet<String>,
 }
 impl Hints {
+    fn remember_refactor(&self, conn: &Connection, root: &Path, edits: &[Value]) -> Result<String> {
+        let id: String = conn.query_row("SELECT lower(hex(randomblob(4)))", [], |r| r.get(0))?;
+        self.refactors.remember(conn, &id, root, edits)?;
+        Ok(id)
+    }
+
+    pub fn apply_refactor(&self, root: &Path, args: &Value) -> Result<Value> {
+        self.refactors.apply(root, args)
+    }
     fn add(&self, result: &mut Value, name: &str) {
         static WORKFLOW: OnceLock<Value> = OnceLock::new();
         let workflow = WORKFLOW.get_or_init(|| {
@@ -184,7 +199,7 @@ impl Hints {
     }
 }
 
-fn flow_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+pub(super) fn flow_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let raw: String = r.get("path_json")?;
     Ok(
         json!({"id":r.get::<_,i64>("id")?,"name":clean(&r.get::<_,String>("name")?),"entry_point_id":r.get::<_,Option<i64>>("entry_point_id")?,
@@ -328,7 +343,7 @@ pub fn flows(
     Ok(value)
 }
 
-fn group_rows(conn: &Connection, sort: &str, min_size: i64) -> Result<Vec<Value>> {
+pub(super) fn group_rows(conn: &Connection, sort: &str, min_size: i64) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT * FROM communities WHERE size>=?1 ORDER BY {sort}"
     ))?;
@@ -418,6 +433,10 @@ pub fn communities(conn: &Connection, args: &Value, single: bool, hints: &Hints)
 pub const NAMES: &[&str] = &[
     "get_impact_radius_tool",
     "get_review_context_tool",
+    "traverse_graph_tool",
+    "refactor_tool",
+    "detect_changes_tool",
+    "get_minimal_context_tool",
     "get_affected_flows_tool",
     "get_knowledge_gaps_tool",
     "get_suggested_questions_tool",
@@ -439,6 +458,10 @@ pub fn run(
     hints: &Hints,
 ) -> Result<Value> {
     match name {
+        "get_minimal_context_tool" => context::run(conn, root, args),
+        "detect_changes_tool" => detect::run(conn, root, args, hints),
+        "refactor_tool" => refactor::run(conn, root, args, hints),
+        "traverse_graph_tool" => traverse::run(conn, root, args),
         "get_review_context_tool" => review::run(conn, root, args),
         "get_impact_radius_tool" => impact::run(conn, root, args),
         "get_affected_flows_tool" => affected::run(conn, root, args, hints),

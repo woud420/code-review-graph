@@ -1,7 +1,7 @@
 use regex::RegexSet;
 use std::{path::Path, sync::LazyLock};
 
-pub(crate) fn test_file(file: &str, repo: Option<&str>) -> bool {
+pub fn test_file(file: &str, repo: Option<&str>) -> bool {
     let path = Path::new(file);
     if path
         .file_name()

@@ -7,12 +7,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn git(root: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
-    let seconds = std::env::var("CRG_DISCOVERY_TIMEOUT")
+pub(super) fn git(root: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
+    git_timed(root, args, "CRG_DISCOVERY_TIMEOUT", 3.)
+}
+
+pub(super) fn git_timed(
+    root: &Path,
+    args: &[&str],
+    setting: &str,
+    default: f64,
+) -> Result<(bool, Vec<u8>)> {
+    let seconds = std::env::var(setting)
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .filter(|s| s.is_finite() && *s > 0.)
-        .unwrap_or(3.);
+        .unwrap_or(default);
     let mut child=Command::new("git").current_dir(root).args(args).stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().context("could not determine the changes: git could not be run. Install git and make sure it is on PATH.")?;
     let mut stdout = child.stdout.take().context("git output unavailable")?;
     let read = std::thread::spawn(move || {
@@ -179,28 +188,15 @@ pub(super) fn paths(root: &Path, args: &serde_json::Value) -> Result<Vec<String>
     discover(root, args["base"].as_str().unwrap_or("HEAD~1"))
 }
 
+mod diff;
+pub(super) use diff::{Diff, read_diff};
+
 pub(super) fn hunks(
     root: &Path,
     base: &str,
 ) -> Result<std::collections::HashMap<String, Vec<(i64, i64)>>> {
-    let (_, diff) = git(root, &["diff", "--unified=0", base, "--"])?;
-    let mut out = std::collections::HashMap::new();
-    let mut file = String::new();
-    let header = regex::Regex::new(r"^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@")?;
-    for line in String::from_utf8_lossy(&diff).lines() {
-        if line.starts_with("diff --git ") {
-            file.clear();
-        } else if let Some(path) = line.strip_prefix("+++ b/") {
-            file = path.trim_end_matches('\t').to_owned();
-        } else if let Some(caps) = header.captures(line)
-            && !file.is_empty()
-        {
-            let start: i64 = caps[1].parse()?;
-            let count: i64 = caps.get(2).map(|s| s.as_str()).unwrap_or("1").parse()?;
-            out.entry(file.clone())
-                .or_insert_with(Vec::new)
-                .push((start, start + (count - 1).max(0)));
-        }
-    }
-    Ok(out)
+    Ok(read_diff(root, base)?
+        .into_iter()
+        .map(|f| (f.path, f.hunks.iter().map(|h| h.range()).collect()))
+        .collect())
 }

@@ -12,12 +12,7 @@ pub(super) fn savings(
     detail: &str,
     depth: i64,
 ) {
-    let baseline: usize = paths
-        .iter()
-        .filter_map(|p| root.join(p).metadata().ok())
-        .filter(|m| m.is_file())
-        .map(|m| (m.len() as usize).div_ceil(4).max(1))
-        .sum();
+    let baseline = file_tokens(root, paths);
     if baseline > 0 {
         let returned = super::architecture::tokens(out);
         super::super::history::record(
@@ -229,4 +224,12 @@ pub(super) fn run(conn: &Connection, root: &Path, args: &Value) -> Result<Value>
         depth,
     );
     Ok(out)
+}
+pub(super) fn file_tokens(root: &Path, paths: &[String]) -> usize {
+    paths
+        .iter()
+        .filter_map(|p| root.join(p).metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| (m.len() as usize).div_ceil(4).max(1))
+        .sum()
 }

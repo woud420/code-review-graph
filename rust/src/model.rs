@@ -1,14 +1,31 @@
 pub mod cfamily;
 pub mod go;
+pub mod hcl;
 pub mod json;
+pub mod ruby;
+pub mod sql;
+pub mod syntax;
 mod test_paths;
 pub mod typescript;
+pub mod yaml;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-pub(crate) use test_paths::test_file;
+pub use test_paths::test_file;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ParsedFile {
+    #[serde(default)]
+    pub ruby: ruby::RubyFacts,
+    #[serde(default)]
+    pub php_imports: BTreeMap<String, String>,
+    #[serde(default)]
+    pub hcl: hcl::HclFacts,
+    #[serde(default)]
+    pub yaml: yaml::YamlFacts,
+    #[serde(default)]
+    pub syntax: syntax::SyntaxFacts,
+    #[serde(default)]
+    pub sql: sql::SqlFacts,
     #[serde(default)]
     pub typescript: typescript::TypeScriptFacts,
     #[serde(default)]

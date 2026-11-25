@@ -4,8 +4,8 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-fn conventional(node: &Node) -> bool {
-    let decorated = match node.extra.get("decorators") {
+pub fn conventional_entry(name: &str, language: &str, extra: &serde_json::Value) -> bool {
+    let decorated = match extra.get("decorators") {
         Some(serde_json::Value::String(name)) => DECORATOR.is_match(name),
         Some(serde_json::Value::Array(names)) => names
             .iter()
@@ -13,9 +13,7 @@ fn conventional(node: &Node) -> bool {
             .any(|n| DECORATOR.is_match(n)),
         _ => false,
     };
-    ENTRY.is_match(&node.name)
-        || (node.language == "php" && PHP_ENTRY.is_match(&node.name))
-        || decorated
+    ENTRY.is_match(name) || (language == "php" && PHP_ENTRY.is_match(name)) || decorated
 }
 
 struct Adjacency {
@@ -84,7 +82,7 @@ impl Adjacency {
         } else {
             self.called[index]
         };
-        !called || conventional(node)
+        !called || conventional_entry(&node.name, &node.language, &node.extra)
     }
 
     fn trace(&self, start: usize) -> (Vec<usize>, usize) {
@@ -182,4 +180,103 @@ pub(super) fn store(tx: &Transaction<'_>, nodes: &[Node], edges: &[Edge]) -> Res
         }
     }
     Ok(flows.len())
+}
+
+pub struct RemovedFlowNode {
+    pub name: String,
+    pub qualified_name: String,
+    pub file: String,
+    pub callers: Vec<String>,
+    pub callees: Vec<String>,
+}
+
+/// Reinsert deleted call targets in memory so review reports can measure the flows they broke.
+pub fn removed_flow_scores(
+    conn: &rusqlite::Connection,
+    removed: &[RemovedFlowNode],
+) -> Result<HashMap<String, f64>> {
+    if removed.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut nodes = super::nodes(conn)?;
+    let mut edges = super::edges(conn)?;
+    let repo: Option<String> = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key='repo_root'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let original = Adjacency::new(&nodes, &edges, repo.as_deref());
+    let callers: HashSet<_> = removed
+        .iter()
+        .flat_map(|r| r.callers.iter().map(String::as_str))
+        .collect();
+    let mut entry_ids = nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, n)| {
+            callers.contains(n.qn.as_str()) && original.is_entry_point(*i, n, repo.as_deref())
+        })
+        .map(|(_, n)| n.id)
+        .collect::<HashSet<_>>();
+    let names = serde_json::to_string(&callers)?;
+    let mut query=conn.prepare("SELECT DISTINCT f.entry_point_id FROM flows f JOIN flow_memberships m ON f.id=m.flow_id JOIN nodes n ON n.id=m.node_id WHERE n.qualified_name IN(SELECT value FROM json_each(?1)) AND f.entry_point_id IS NOT NULL")?;
+    for id in query.query_map([names], |r| r.get::<_, i64>(0))? {
+        entry_ids.insert(id?);
+    }
+    let start = nodes.len();
+    for (i, r) in removed.iter().enumerate() {
+        nodes.push(Node {
+            id: -(i as i64 + 1),
+            name: r.name.clone(),
+            qn: r.qualified_name.clone(),
+            file: r.file.clone(),
+            kind: "Function".into(),
+            language: String::new(),
+            parent: None,
+            test: false,
+            extra: serde_json::Value::Null,
+        });
+    }
+    let existing: HashSet<_> = nodes.iter().map(|n| n.qn.as_str()).collect();
+    for r in removed {
+        for caller in &r.callers {
+            edges.push(Edge {
+                kind: "CALLS".into(),
+                src: caller.clone(),
+                dst: r.qualified_name.clone(),
+            });
+        }
+        for target in &r.callees {
+            let dst = if target.contains("::") || existing.contains(target.as_str()) {
+                target.clone()
+            } else {
+                format!("{}::{target}", r.file)
+            };
+            edges.push(Edge {
+                kind: "CALLS".into(),
+                src: r.qualified_name.clone(),
+                dst,
+            });
+        }
+    }
+    let adj = Adjacency::new(&nodes, &edges, repo.as_deref());
+    let mut scores = HashMap::new();
+    for (i, n) in nodes[..start].iter().enumerate() {
+        if !entry_ids.contains(&n.id) {
+            continue;
+        }
+        let (path, depth) = adj.trace(i);
+        let files = path
+            .iter()
+            .map(|&i| &nodes[i].file)
+            .collect::<HashSet<_>>()
+            .len();
+        let score = adj.score(&path, &nodes, files, depth);
+        for i in path.into_iter().filter(|&i| i >= start) {
+            *scores.entry(nodes[i].qn.clone()).or_insert(0.0) += score;
+        }
+    }
+    Ok(scores)
 }

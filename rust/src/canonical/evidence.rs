@@ -249,6 +249,36 @@ impl<'a> CallEvidence<'a> {
     ) -> Value {
         let site_key = (caller, line, raw);
         let method = raw.rsplit('.').next().unwrap_or(raw);
+        if let Some(site) = self.facts.syntax.site(caller, raw, line) {
+            let mut extra = site.extra.clone();
+            if self.source.language == "php"
+                && site.target.is_none()
+                && let Some((bound_file, _)) = bound
+            {
+                let imported = raw
+                    .split_once("::")
+                    .and_then(|(scope, _)| self.facts.php_imports.get(scope))
+                    .and_then(|fqn| {
+                        crate::parser::php::imports::local_file(self.root, self.file, fqn, |p| {
+                            self.paths.contains(p)
+                        })
+                    });
+                if imported.is_some_and(|path| path == bound_file) {
+                    extra["scoped_resolution"] = json!("import");
+                } else {
+                    extra["scoped_resolved"] = json!(true);
+                    extra["scoped_via"] = json!("single_match");
+                }
+            }
+            if self.source.language == "csharp" && bound.is_some() {
+                extra["scoped_resolved"] = json!(true);
+                extra["scoped_via"] = json!("csharp_namespace");
+                if let Some(obj) = extra.as_object_mut() {
+                    obj.remove("unresolved_targets");
+                }
+            }
+            return extra;
+        }
         if !self.facts.cfamily.language.is_empty() {
             return self.facts.cfamily.evidence(
                 caller,

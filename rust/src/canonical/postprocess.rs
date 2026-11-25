@@ -1,7 +1,9 @@
 mod communities;
 mod cpp;
 mod flows;
+pub use flows::{RemovedFlowNode, conventional_entry, removed_flow_scores};
 mod fts;
+mod java;
 mod patterns;
 
 use anyhow::Result;
@@ -47,14 +49,14 @@ struct Edge {
     dst: String,
 }
 
-fn nodes(tx: &Transaction<'_>) -> Result<Vec<Node>> {
+fn nodes(tx: &rusqlite::Connection) -> Result<Vec<Node>> {
     Ok(tx.prepare("SELECT id,name,kind,qualified_name,file_path,coalesce(language,''),parent_name,is_test,extra FROM nodes ORDER BY id")?
         .query_map([],|r| Ok(Node{id:r.get(0)?,name:r.get(1)?,kind:r.get(2)?,qn:r.get(3)?,file:r.get(4)?,language:r.get(5)?,parent:r.get(6)?,
             test:r.get::<_,Option<bool>>(7)?.unwrap_or(false),extra:serde_json::from_str(&r.get::<_,Option<String>>(8)?.unwrap_or_default()).unwrap_or(Value::Null)}))?
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn edges(tx: &Transaction<'_>) -> Result<Vec<Edge>> {
+fn edges(tx: &rusqlite::Connection) -> Result<Vec<Edge>> {
     Ok(tx
         .prepare("SELECT kind,source_qualified,target_qualified FROM edges ORDER BY kind,source_qualified,target_qualified,file_path,line")?
         .query_map([], |r| {
@@ -97,7 +99,7 @@ fn resolve_bare(tx: &Transaction<'_>, nodes: &[Node]) -> Result<usize> {
         ("TESTED_BY", "source_qualified", "bare_tested_by_source"),
     ] {
         let query = format!(
-            "SELECT id,{endpoint},file_path,extra FROM edges WHERE kind=? AND instr({endpoint},'::')=0 ORDER BY id"
+            "SELECT id,{endpoint},file_path,extra,CASE kind WHEN 'CALLS' THEN source_qualified ELSE target_qualified END FROM edges WHERE kind=? AND instr({endpoint},'::')=0 ORDER BY id"
         );
         let mut stmt = tx.prepare(&query)?;
         let candidates = stmt
@@ -107,15 +109,21 @@ fn resolve_bare(tx: &Transaction<'_>, nodes: &[Node]) -> Result<usize> {
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut write = tx.prepare(&format!("UPDATE edges SET {endpoint}=?,extra=? WHERE id=?"))?;
-        for (id, name, file, raw) in candidates {
-            let Some(options) = names.get(name.as_str()) else {
+        for (id, name, file, raw, caller) in candidates {
+            let mut extra: Value = serde_json::from_str(raw.as_deref().unwrap_or("{}"))?;
+            let lookup = if name == "new" && extra["receiver_constant"] == true {
+                "initialize"
+            } else {
+                name.as_str()
+            };
+            let Some(options) = names.get(lookup) else {
                 continue;
             };
-            let mut extra: Value = serde_json::from_str(raw.as_deref().unwrap_or("{}"))?;
             if !extra.is_object()
                 || [
                     "ambiguous_targets",
@@ -128,13 +136,48 @@ fn resolve_bare(tx: &Transaction<'_>, nodes: &[Node]) -> Result<usize> {
                 continue;
             }
             let binding = extra["receiver_binding"].as_str();
+            let ruby_class = if file.ends_with(".rb") && extra["receiver_constant"] == true {
+                extra["receiver_class"].as_str().and_then(|name| {
+                    extra["receiver_scopes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(|scope| format!("{scope}.{name}"))
+                        .chain(std::iter::once(name.to_owned()))
+                        .find(|key| {
+                            options
+                                .iter()
+                                .any(|n| n.language == "ruby" && n.parent.as_ref() == Some(key))
+                        })
+                })
+            } else {
+                None
+            };
+            let php_owner = file
+                .ends_with(".php")
+                .then(|| {
+                    caller
+                        .split_once("::")?
+                        .1
+                        .rsplit_once('.')
+                        .map(|(owner, _)| owner)
+                })
+                .flatten();
+            let php_own_method = php_owner.and_then(|o| {
+                options
+                    .iter()
+                    .find(|n| n.file == file && n.parent.as_deref() == Some(o))
+            });
+
             let matches = options
                 .iter()
                 .filter(|n| {
                     let receiver_file = extra["receiver_module"]
                         .as_str()
                         .or_else(|| extra["receiver_class_file"].as_str());
-                    let supported = n.file == file
+                    let supported = (ruby_class.is_some() && n.language == "ruby")
+                        || n.file == file
                         || imports
                             .get(&file)
                             .is_some_and(|files| files.contains(&n.file))
@@ -149,14 +192,26 @@ fn resolve_bare(tx: &Transaction<'_>, nodes: &[Node]) -> Result<usize> {
                         && match binding {
                             Some("class") => {
                                 n.parent.as_deref()
-                                    == extra["receiver_class"]
-                                        .as_str()
+                                    == ruby_class
+                                        .as_deref()
+                                        .or_else(|| extra["receiver_class"].as_str())
                                         .or_else(|| extra["receiver_type"].as_str())
                             }
                             Some("module") => receiver_file == Some(&n.file) && n.parent.is_none(),
                             Some(_) => false,
+                            None if file.ends_with(".php") && extra["receiver"].is_string() => {
+                                match (extra["receiver"].as_str(), extra["receiver_type"].as_str())
+                                {
+                                    (_, Some(ty)) => n.parent.as_deref() == ty.rsplit('\\').next(),
+                                    (Some("$this"), _) => {
+                                        php_own_method.is_none_or(|owner| n.qn == owner.qn)
+                                    }
+                                    _ => php_own_method.is_none_or(|owner| n.qn != owner.qn),
+                                }
+                            }
                             None => {
                                 file.ends_with(".go")
+                                    || (n.language == "sql" && n.file == file)
                                     || extra.get("member_call").is_some()
                                     || extra.get("receiver").is_none()
                                         && extra.get("receiver_form").is_none()
@@ -185,8 +240,34 @@ fn resolve_bare(tx: &Transaction<'_>, nodes: &[Node]) -> Result<usize> {
 }
 
 pub fn process(tx: &Transaction<'_>, level: Level, full: bool) -> Result<Report> {
+    let stages = Stages {
+        resolve: level != Level::None,
+        fts: level != Level::None,
+        flows: level == Level::Full,
+        communities: level == Level::Full,
+    };
+    let report = compute(tx, stages, full)?;
+    if level == Level::Full {
+        tx.execute_batch("INSERT OR REPLACE INTO metadata VALUES('postprocess_level','full');
+            INSERT OR REPLACE INTO metadata VALUES('last_postprocessed_at',strftime('%Y-%m-%dT%H:%M:%S','now','localtime'))")?;
+    }
+    if level != Level::None {
+        super::set_metadata(tx, "build_state", "complete")?;
+    }
+    Ok(report)
+}
+
+struct Stages {
+    resolve: bool,
+    fts: bool,
+    flows: bool,
+    communities: bool,
+}
+
+fn compute(tx: &Transaction<'_>, stages: Stages, full: bool) -> Result<Report> {
     let mut report = Report::default();
-    let entities = if level == Level::None {
+    java::resolve_framework_calls(tx)?;
+    let entities = if !stages.resolve {
         Vec::new()
     } else {
         nodes(tx)?
@@ -197,12 +278,12 @@ pub fn process(tx: &Transaction<'_>, level: Level, full: bool) -> Result<Report>
         WHERE kind='REFERENCES' AND instr(target_qualified,'::')>0
         AND NOT EXISTS (SELECT 1 FROM nodes WHERE qualified_name=edges.target_qualified)",
     )?;
-    if level != Level::None {
+    if stages.resolve {
         report.bare_edges_resolved = resolve_bare(tx, &entities)?;
         report.cpp_scoped_edges_resolved = cpp::scoped_calls(tx, &entities)?;
     }
     tx.execute_batch(include_str!("certainty.sql"))?;
-    if level == Level::None {
+    if !stages.resolve {
         return Ok(report);
     }
     let stage = std::time::Instant::now();
@@ -210,32 +291,97 @@ pub fn process(tx: &Transaction<'_>, level: Level, full: bool) -> Result<Report>
     report
         .timing
         .insert("signatures_s".into(), stage.elapsed().as_secs_f64());
-    let stage = std::time::Instant::now();
-    report.fts_delta = fts::sync(tx, entities.len(), full)?;
-    report
-        .timing
-        .insert("fts_s".into(), stage.elapsed().as_secs_f64());
-    report.fts_indexed = entities.len();
-    if level == Level::Full {
-        let links = edges(tx)?;
+    if stages.fts {
         let stage = std::time::Instant::now();
-        report.flows_detected = flows::store(tx, &entities, &links)?;
+        report.fts_delta = fts::sync(tx, entities.len(), full)?;
         report
             .timing
-            .insert("flows_s".into(), stage.elapsed().as_secs_f64());
-        let stage = std::time::Instant::now();
-        report.communities_detected = communities::store(tx, &entities, &links)?;
-        report
-            .timing
-            .insert("communities_s".into(), stage.elapsed().as_secs_f64());
-        tx.execute_batch("INSERT OR REPLACE INTO metadata VALUES('postprocess_level','full');
-            INSERT OR REPLACE INTO metadata VALUES('last_postprocessed_at',strftime('%Y-%m-%dT%H:%M:%S','now','localtime'))")?;
+            .insert("fts_s".into(), stage.elapsed().as_secs_f64());
+        report.fts_indexed = entities.len();
     }
-    tx.execute(
-        "INSERT OR REPLACE INTO metadata VALUES('build_state','complete')",
-        [],
-    )?;
+    if stages.flows || stages.communities {
+        let links = edges(tx)?;
+        if stages.flows {
+            let stage = std::time::Instant::now();
+            report.flows_detected = flows::store(tx, &entities, &links)?;
+            report
+                .timing
+                .insert("flows_s".into(), stage.elapsed().as_secs_f64());
+        }
+        if stages.communities {
+            let stage = std::time::Instant::now();
+            report.communities_detected = communities::store(tx, &entities, &links)?;
+            report
+                .timing
+                .insert("communities_s".into(), stage.elapsed().as_secs_f64());
+        }
+    }
     Ok(report)
+}
+
+pub struct StandaloneReport {
+    pub computed: Report,
+    pub incomplete: bool,
+    pub new_db: bool,
+}
+
+pub fn rerun(
+    path: &std::path::Path,
+    root: &std::path::Path,
+    flows: bool,
+    communities: bool,
+    fts: bool,
+    wait: bool,
+) -> Result<StandaloneReport> {
+    use anyhow::{Context, ensure};
+    super::ensure_writable(path)?;
+    let dir = path.parent().context("missing graph directory")?;
+    std::fs::create_dir_all(dir)?;
+    let _lock = super::WriteLock::acquire(dir, wait)?;
+    let mut db = rusqlite::Connection::open(path)?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let new_db = tx.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )?;
+    if new_db {
+        tx.execute_batch(include_str!("schema.sql"))?;
+        super::set_metadata(&tx, "schema_version", "15")?;
+        super::set_metadata(&tx, "repo_root", root.to_str().context("non UTF-8 root")?)?;
+    } else {
+        ensure!(
+            super::metadata(&tx, "schema_version")?.as_deref() == Some("15"),
+            "unsupported graph schema"
+        );
+        if let Some(owner) = super::metadata(&tx, "repo_root")? {
+            ensure!(
+                std::path::Path::new(&owner) == root,
+                "index belongs to another repository"
+            );
+        }
+    }
+    let incomplete = super::metadata(&tx, "build_state")?.as_deref() == Some("in-progress");
+    let computed = compute(
+        &tx,
+        Stages {
+            resolve: true,
+            flows,
+            communities,
+            fts,
+        },
+        true,
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO metadata VALUES('last_postprocessed_at',strftime('%Y-%m-%dT%H:%M:%S','now','localtime'))")?;
+    if !incomplete {
+        super::set_metadata(&tx, "build_state", "complete")?;
+    }
+    tx.commit()?;
+    Ok(StandaloneReport {
+        computed,
+        incomplete,
+        new_db,
+    })
 }
 
 // Match round(value, 4) on the original binary float without an intermediate

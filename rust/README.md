@@ -23,17 +23,18 @@ The comparison uses upstream commit `7ba9d17ab6fd281026b914d8da4c0dc98d013474`. 
 
 ```sh
 git worktree add --detach ../crg-reference 7ba9d17ab6fd281026b914d8da4c0dc98d013474
-uv sync --project ../crg-reference --python 3.12 --frozen --no-dev
+uv sync --project ../crg-reference --python 3.12 --frozen --group dev
 make cutover REFERENCE=../crg-reference PYTHON=../crg-reference/.venv/bin/python
 ```
 
 - `make check` runs rustfmt, Clippy with warnings denied, type checks, and native tests. Process tests launch the public binary with an empty executable search path.
-- `make parity` compares the proof binary with pinned Python on rebuild, incremental rename, duplicate notification, deletion, restoration, and direct caller queries. It also checks the official MCP client, public build tool, language-specific fixtures, graph queries, search ranking, and the context history writer and reader. The whole-package check requires exact equality of the distinct bound caller–callee pairs across all 95 upstream Python modules.
+- `make parity` compares the proof binary with pinned Python on rebuild, incremental rename, duplicate notification, deletion, restoration, and direct caller queries. It also checks the official MCP client, public build tool, language-specific fixtures, graph queries, search ranking, and the context history writer and reader. It exercises actual MCP rename previews and edits, adopted multilingual databases, visualization file bytes and evaluation reports from upstream CSVs. The whole-package check requires exact equality of the distinct bound caller–callee pairs across all 95 upstream Python modules.
 - `make graph-parity` builds two independent public v15 databases from those 95 modules. It compares file hashes, symbol spans, declarations, duplicate edges, certainty attributes, flow members and scores, and community assignments. Timestamps and storage-specific row IDs are excluded from this graph comparison.
 - `make public-parity` runs both public command lines in separate processes on an identical fixture path. It compares stdout, stderr, exit codes, reads from a Python-built database, MCP protocol responses, prompts and tool descriptions. Its operation inventory reports entry points that still need behavioral fixtures.
+- `make upstream-surface` exercises the pinned upstream release’s command and flag scenarios through both installed executables in an isolated home and repository. It records stdout, stderr and exit codes.
 - `make fixture-parity` compares independently built graphs across the full upstream multilingual fixture directory, including languages that Rust cannot index yet.
 - `make cutover` runs every comparison and returns a failing status while any comparison or coverage requirement fails. The public and database reports are written to `target/parity/` by default. GitHub Actions runs the same replacement gate independently of its native build job.
 
-Native indexing includes Python, Rust, JavaScript, TypeScript, TSX, shell, JSON, Go, C and C++. The strict graph comparison covers every file in the pinned upstream Python package. The wider fixture and public behavior reports track open differences, including unsupported languages, installers and optional integrations. Keep Python available for those workflows until the replacement gate passes.
+Native indexing includes Python, Rust, JavaScript, TypeScript, TSX, shell, JSON, Go, C, C++, Java, C#, SQL, YAML, Terraform, Solidity, Lua, Luau, PHP and Ruby. The strict graph comparison covers every file in the pinned upstream Python package. The wider fixture and public behavior reports track open differences, including unsupported languages, installers and optional integrations. Keep Python available for those workflows until the replacement gate passes.
 
 For an architecture check, run `deslop-please` at the workspace root with `rust-analyzer` on the executable search path.

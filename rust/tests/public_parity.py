@@ -39,6 +39,7 @@ REVIEW_COMMANDS = {
     "detect-changes/clean": ["detect-changes", "--brief"],
     "refactor/dead": ["refactor", "dead_code", "--kind", "Function"],
     "context-history/empty": ["context-history", "--json"],
+    "visualize/json": ["visualize", "--format", "json"],
     "forget/dry-run": ["forget", "--dry-run", "lib.ts"],
 }
 
@@ -144,7 +145,10 @@ def adopt_graph(command, repo, env):
 
 def saved_graph(command, repo, env, extended):
     cases = SAVED_QUERIES | REVIEW_COMMANDS if extended else SAVED_QUERIES
-    return {name: run(command + [*args, "--repo", str(repo)], repo, env) for name, args in cases.items()}
+    outputs = {name: run(command + [*args, "--repo", str(repo)], repo, env) for name, args in cases.items()}
+    if extended:
+        outputs["eval/report"] = run([*command, "eval", "--report"], repo, env)
+    return outputs
 
 
 def reference_cli_tree(python, cwd, env):
@@ -358,8 +362,43 @@ def capture(args, temp):
     tested_commands = {"build", "query", "update", "status", "search", "serve"}
     if args.cutover:
         tested_commands.update(argv[0] for argv in REVIEW_COMMANDS.values())
+        tested_commands.add("eval")
     daemon_paths = {p.removeprefix("daemon ") for p in tree if p.startswith("daemon ")}
     covered_daemon = set()
+    if args.cutover:
+        from standalone_parity import against_reference
+        witness_dir = temp / "standalone"
+        witness_dir.mkdir()
+        try:
+            expected, actual = against_reference(witness_dir, source, candidate[0])
+        except (AssertionError, OSError, RuntimeError, ValueError, TimeoutError, subprocess.SubprocessError) as error:
+            result.check("standalone/execution", "both processes completed all probes", repr(error))
+            expected, actual = {}, {}
+        for name in expected:
+            if name == "graph":
+                groups = expected[name]
+                for group in groups:
+                    result.check("standalone/graph/" + group, [], [] if groups[group] == actual[name][group] else ["different rows"])
+            else:
+                result.check("standalone/" + name, expected[name], actual[name])
+        tested_commands.update({"register","repos","unregister","postprocess","mcp","wiki"})
+        untested_tools = sorted(set(untested_tools) - {"run_postprocess_tool","cross_repo_search_tool","semantic_search_nodes_tool","generate_wiki_tool"})
+        from build_tool_parity import run as exercise_build
+        build_dir = temp / "mcp-build"
+        build_dir.mkdir()
+        build_repo=build_dir / "repo"
+        setup(build_repo)
+        fresh=build_dir / "pristine"
+        shutil.copytree(build_repo,fresh)
+        builds=exercise_build(reference,build_repo,env)
+        shutil.rmtree(build_repo)
+        shutil.copytree(fresh,build_repo)
+        try:
+            native_builds = exercise_build(candidate,build_repo,candidate_env)
+        except (AssertionError, OSError, RuntimeError, ValueError, TimeoutError, subprocess.SubprocessError) as error:
+            native_builds = {"execution": repr(error)}
+        compare_group(result,"MCP-build",builds,native_builds)
+        untested_tools = sorted(set(untested_tools) - {"build_or_update_graph_tool"})
     if args.cutover:
         from daemon_parity import compare as compare_daemon
         coverage = compare_daemon(result, source, args.python, candidate[0], daemon[0] if daemon else None)

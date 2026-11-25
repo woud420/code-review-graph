@@ -3,8 +3,9 @@ mod doc_metadata;
 pub(super) use confidence::empty as empty_confidence;
 mod relationships;
 mod route;
+pub(super) mod terms;
 mod tests_for;
-use super::{store, terms};
+use super::store;
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, Row};
 use serde::Deserialize;
@@ -575,4 +576,11 @@ pub fn run(conn: &Connection, root: &Path, q: &Query) -> Result<Value> {
 
 pub(super) fn test_count(conn: &Connection, node: &Value) -> Result<usize> {
     Ok(tests_for::explicit(conn, node)?.0.len())
+}
+pub(super) fn explicit_tests(conn: &Connection, node: &Value) -> Result<Vec<Value>> {
+    Ok(tests_for::explicit(conn, node)?
+        .0
+        .into_iter()
+        .map(|pair| pair.row)
+        .collect())
 }

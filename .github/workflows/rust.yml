@@ -32,7 +32,7 @@ jobs:
           ref: 7ba9d17ab6fd281026b914d8da4c0dc98d013474
           path: reference
       - uses: astral-sh/setup-uv@v7
-      - run: uv sync --project reference --python 3.12 --frozen --no-dev
+      - run: uv sync --project reference --python 3.12 --frozen --group dev
       - run: make cutover REFERENCE=reference PYTHON=reference/.venv/bin/python
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

@@ -38,6 +38,9 @@ REVIEW_CASES = {
     "no-wiki-page": ("get_wiki_page_tool", {"community_name": "absent"}),
     "connections": ("get_surprising_connections_tool", {"top_n": 1}),
     "isolated-registry": ("list_repos_tool", {}),
+    "traverse-bfs": ("traverse_graph_tool", {"query": "target", "mode": "bfs", "depth": 2}),
+    "dead-code": ("refactor_tool", {"mode": "dead_code", "max_results": 1}),
+    "absent-refactor": ("apply_refactor_tool", {"refactor_id": "missing-preview", "dry_run": True}),
 }
 
 

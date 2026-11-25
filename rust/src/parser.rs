@@ -1,9 +1,18 @@
 pub(crate) mod bash;
 pub(crate) mod cfamily;
+mod config;
+mod csharp;
 pub(crate) mod go;
-mod json;
+use config::{hcl, json};
+mod java;
+mod lua;
+pub(crate) mod php;
+pub(crate) mod ruby;
+mod solidity;
+pub(crate) mod sql;
 mod syntax;
 mod typescript;
+pub(crate) use config::yaml;
 use std::path::Path;
 use syntax::{direct_target, field, record};
 
@@ -16,8 +25,19 @@ mod python;
 
 pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
     let grammar = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("rb") => return ruby::parse(path, source),
+        Some("tf" | "hcl") => return hcl::parse(source),
+        Some("properties") if yaml::spring::supports(path) => return Ok(yaml::parse(path, source)),
+        Some("yaml" | "yml") => return Ok(yaml::parse(path, source)),
+        Some(ext) if sql::supports(ext) => return sql::parse(path, source, None),
         Some(ext) if cfamily::supports(ext) => return cfamily::parse(path, source),
         Some("json") => return crate::parser::json::parse(path, source),
+        Some("php") => tree_sitter_php::LANGUAGE_PHP,
+        Some("lua") => tree_sitter_lua::LANGUAGE,
+        Some("luau") => tree_sitter_luau::LANGUAGE,
+        Some("sol") => tree_sitter_solidity::LANGUAGE,
+        Some("cs") => tree_sitter_c_sharp::LANGUAGE,
+        Some("java") => tree_sitter_java::LANGUAGE,
         Some("go") => tree_sitter_go::LANGUAGE,
         Some("py") => tree_sitter_python::LANGUAGE,
         Some("rs") => tree_sitter_rust::LANGUAGE,
@@ -30,8 +50,26 @@ pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
     let mut parser = Parser::new();
     parser.set_language(&grammar.into())?;
     let tree = parser.parse(source, None).context("parsing source")?;
+    if matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("lua" | "luau")
+    ) {
+        return Ok(lua::extract(tree.root_node(), source));
+    }
+    if path.extension().is_some_and(|ext| ext == "php") {
+        return Ok(php::extract(path, tree.root_node(), source));
+    }
     if crate::parser::bash::supports(path, source.as_bytes()) {
         return Ok(crate::parser::bash::extract(tree.root_node(), source));
+    }
+    if path.extension().is_some_and(|e| e == "sol") {
+        return Ok(solidity::extract(tree.root_node(), source));
+    }
+    if path.extension().is_some_and(|e| e == "cs") {
+        return Ok(csharp::extract(tree.root_node(), source));
+    }
+    if path.extension().is_some_and(|e| e == "java") {
+        return Ok(java::extract(tree.root_node(), source));
     }
     if path.extension().is_some_and(|e| e == "go") {
         return Ok(crate::parser::go::extract(path, tree.root_node(), source));

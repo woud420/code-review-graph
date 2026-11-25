@@ -199,18 +199,7 @@ pub fn tool_stats(conn: &Connection, root: &Path) -> Result<Value> {
     )?;
     let direct = splits.get("direct").copied().unwrap_or(0);
     let unresolved = splits.get("unresolved").copied().unwrap_or(0);
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='embeddings')",
-        [],
-        |r| r.get(0),
-    )?;
-    let embedded = if exists {
-        conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| {
-            r.get::<_, i64>(0)
-        })?
-    } else {
-        0
-    };
+    let embedded = embedding_count(conn)?;
     let langs = if stats.languages.is_empty() {
         "none".to_owned()
     } else {
@@ -236,6 +225,21 @@ pub fn tool_stats(conn: &Connection, root: &Path) -> Result<Value> {
         json!({"status":"ok","summary":summary,"total_nodes":stats.nodes(),"total_edges":stats.edges(),"nodes_by_kind":stats.node_kinds,"edges_by_kind":stats.edge_kinds,
         "calls_by_resolution":{"direct":direct,"unresolved":unresolved},"languages":stats.languages,"files_count":stats.files(),"last_updated":stats.updated,"embeddings_count":embedded}),
     )
+}
+
+pub(super) fn embedding_count(conn: &Connection) -> Result<i64> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='embeddings')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(if exists {
+        conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| {
+            r.get::<_, i64>(0)
+        })?
+    } else {
+        0
+    })
 }
 
 pub fn check_root(conn: &Connection, db: &Path, root: &Path) -> Result<()> {
