@@ -1,5 +1,7 @@
 <h1 align="center">code-review-graph</h1>
 
+**Rust port branch.** Run `make build` for the native executable and `make check` for the Rust test suite. The Python distribution below remains the reference while compatibility work continues. [Rust commands, tested behavior, and replacement criteria](rust/README.md).
+
 <p align="center">
   <a href="https://trendshift.io/repositories/23329?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-23329"
      target="_blank"

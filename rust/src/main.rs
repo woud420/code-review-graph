@@ -1,14 +1,8 @@
-mod graph;
-mod mcp;
-mod model;
-mod parser;
-mod typescript;
-
 use std::{io, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use graph::Graph;
+use code_review_graph_rs::{graph::Graph, mcp};
 use serde_json::{Value, json};
 
 #[derive(Parser)]

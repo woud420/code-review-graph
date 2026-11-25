@@ -1,0 +1,64 @@
+.PHONY: install dev build test typecheck lint fmt format-check check clean
+
+install:
+	cargo fetch --locked
+
+dev:
+	cargo run --locked --bin code-review-graph -- --help
+
+build:
+	cargo build --workspace --release --locked --bins
+
+test:
+	cargo test --workspace --locked
+
+typecheck:
+	cargo check --workspace --locked --all-targets
+
+fmt:
+	cargo fmt --all
+
+format-check:
+	cargo fmt --all -- --check
+
+lint: format-check
+	cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+
+check: lint typecheck test
+
+clean:
+	cargo clean
+
+REFERENCE ?= .
+PYTHON ?= python3
+TARGET_DIR := $(abspath $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target))
+PARITY_REPORT_DIR ?= $(TARGET_DIR)/parity
+
+.PHONY: parity graph-parity public-parity fixture-parity cutover
+
+parity:
+	cargo build --workspace --bins --locked
+	"$(PYTHON)" -B rust/tests/differential.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph-rs" --whole-package
+	"$(PYTHON)" -B rust/tests/mcp_stdio.py "$(TARGET_DIR)/debug/code-review-graph-rs"
+
+	"$(PYTHON)" -B rust/tests/postprocess_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/search_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+
+public-parity graph-parity fixture-parity: parity-binary
+
+.PHONY: parity-binary
+parity-binary:
+	cargo build --locked --bin code-review-graph
+	mkdir -p "$(PARITY_REPORT_DIR)"
+
+public-parity:
+	"$(PYTHON)" -B rust/tests/public_parity.py --cutover --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --report "$(PARITY_REPORT_DIR)/public.json"
+
+graph-parity:
+	"$(PYTHON)" -B rust/tests/canonical_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --report "$(PARITY_REPORT_DIR)/graph.json"
+
+fixture-parity:
+	"$(PYTHON)" -B rust/tests/canonical_parity.py --fixtures --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --report "$(PARITY_REPORT_DIR)/fixtures.json"
+
+cutover:
+	$(MAKE) -k parity public-parity graph-parity fixture-parity

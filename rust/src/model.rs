@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ParsedFile {
@@ -6,6 +7,53 @@ pub struct ParsedFile {
     pub calls: Vec<Call>,
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
+    #[serde(default)]
+    pub python: PythonFacts,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct PythonFacts {
+    pub scoped_imports: Vec<ScopedImport>,
+    pub definitions: BTreeMap<String, PythonDefinition>,
+    pub ambiguities: BTreeSet<String>,
+    pub members: Vec<PythonMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedImport {
+    pub start: usize,
+    pub end: usize,
+    pub binding: Import,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct PythonDefinition {
+    pub parent: Option<String>,
+    pub params: Option<String>,
+    pub returns: Option<String>,
+    pub modifiers: Option<String>,
+    pub bases: Vec<String>,
+    #[serde(default)]
+    pub decorators: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PythonMember {
+    pub caller: String,
+    pub line: usize,
+    pub raw: String,
+    pub attr: String,
+    pub receiver: PythonType,
+    pub property: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PythonType {
+    Named(String),
+    Returned {
+        callee: String,
+        element: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

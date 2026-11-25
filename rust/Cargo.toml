@@ -2,24 +2,46 @@
 name = "code-review-graph-rs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.100.0"
+default-run = "code-review-graph"
 license = "MIT"
 description = "Local incremental code graph with SQLite-backed caller queries"
+repository = "https://github.com/woud420/code-review-graph"
+include = ["src/**", "assets/**", "tests/*.rs", "Cargo.toml", "LICENSE", "README.md"]
+
+[[bin]]
+name = "code-review-graph"
+path = "src/public.rs"
+
+[[bin]]
+name = "code-review-graph-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "crg-daemon"
+path = "src/daemon_main.rs"
 
 [dependencies]
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
+hex = "0.4"
 ignore = "0.4"
+regex = "1"
 rmcp = { version = "3.11", features = ["transport-io"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+signal-hook = "0.3"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 tokio = { version = "1", features = ["rt"] }
 tree-sitter = "0.26"
 tree-sitter-javascript = "0.25"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

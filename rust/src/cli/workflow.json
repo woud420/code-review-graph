@@ -1,0 +1,58 @@
+{
+  "list_flows_tool": [
+    {
+      "tool": "get_flow_tool",
+      "suggestion": "Drill into a specific flow for step-by-step details"
+    },
+    {
+      "tool": "get_affected_flows_tool",
+      "suggestion": "Check which flows are affected by recent changes"
+    },
+    {
+      "tool": "get_architecture_overview_tool",
+      "suggestion": "See the high-level architecture"
+    }
+  ],
+  "get_flow_tool": [
+    {
+      "tool": "query_graph_tool",
+      "suggestion": "Inspect callers/callees of a step in this flow"
+    },
+    {
+      "tool": "get_affected_flows_tool",
+      "suggestion": "Check if changes affect this flow"
+    },
+    {
+      "tool": "list_flows_tool",
+      "suggestion": "Browse other execution flows"
+    }
+  ],
+  "list_communities_tool": [
+    {
+      "tool": "get_community_tool",
+      "suggestion": "Inspect a specific community's members"
+    },
+    {
+      "tool": "get_architecture_overview_tool",
+      "suggestion": "See cross-community coupling and warnings"
+    },
+    {
+      "tool": "list_flows_tool",
+      "suggestion": "See execution flows across communities"
+    }
+  ],
+  "get_community_tool": [
+    {
+      "tool": "query_graph_tool",
+      "suggestion": "Explore callers/callees of community members"
+    },
+    {
+      "tool": "list_communities_tool",
+      "suggestion": "Browse other communities"
+    },
+    {
+      "tool": "get_architecture_overview_tool",
+      "suggestion": "See how this community fits the architecture"
+    }
+  ]
+}

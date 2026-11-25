@@ -1,44 +1,38 @@
-# Rust code-review graph
+# Native code-review-graph
 
-A local Rust CLI and read-only MCP server for finding symbols, callers, callees, and the transitive callers of a changed symbol. The Python implementation alongside this directory is the behavioral reference, pinned to upstream `main` at `7ba9d17ab6fd281026b914d8da4c0dc98d013474`.
-
-## Run it
-
-From this `rust/` directory, build the binary and index the parent repository.
+Build at the repository root with the pinned Rust toolchain. Cargo compiles SQLite and the Tree-sitter parsers into the executable. The native build, formatter, linter, and process tests run without a Python installation.
 
 ```sh
-cargo build --release --locked
-target/release/code-review-graph-rs build --repo ..
-target/release/code-review-graph-rs query callers-of 'code_review_graph/context_savings.py::_savings' --repo ..
-target/release/code-review-graph-rs update --repo ..
+make check
+make build
+target/release/code-review-graph build --repo /absolute/path/to/project
+target/release/code-review-graph status --json --repo /absolute/path/to/project
+target/release/code-review-graph query callers_of my_function --repo /absolute/path/to/project
+target/release/code-review-graph serve --repo /absolute/path/to/project
 ```
 
-Use `query callees-of` for outgoing calls, `query impact --depth 3` for transitive callers, and `query symbols` for a name search. A qualified target takes the form `relative/path::symbol`. Unqualified names combine matches from all files. All CLI results are JSON.
+The public binary reads the upstream v15 SQLite format. To try a fresh native index alongside an existing one, set `CRG_DATA_DIR` to a separate directory for every command in the session. The public writer uses a second file in that directory to cache parsed facts. Writes use the upstream `write.lock`, and a failed update rolls back its changes to the public graph.
 
-Point an MCP client's command at the binary with arguments `["serve", "--repo", "/absolute/path/to/repo"]`. The server exposes `query_graph_tool` with `pattern` (`callers_of` or `callees_of`) and `target`, plus `list_graph_stats_tool`. The results give distinct, directly resolved symbols and their source spans. Build the index with the CLI first. A running MCP session can read subsequent updates.
+Use `--skip-flows` for a build with signatures and text search. Use `--skip-postprocess` for the raw graph. For MCP over stdio, configure the executable as the command with arguments `["serve", "--repo", "/absolute/path/to/project"]`. Its tool list reports the operations currently implemented.
 
-## Current scope
+The earlier `code-review-graph-rs` binary exposes the original proof interface. It stores a separate index in `.code-review-graph-rs/graph.db`. Its `query callers-of` and `query callees-of` commands report distinct symbols. The public binary's `query callers_of` and `query callees_of` also expose the individual call sites.
 
-- JavaScript, TypeScript and TSX support includes relative imports, aliases, re-exports and callback calls. Python resolves explicit module-level relative and repository-root imports, aliases and re-exports. Rust supports same-file function and method definitions and common direct calls. Rust module and trait resolution, dynamic dispatch, TypeScript configuration aliases, and framework-specific inference remain open.
-- The port stores its index in `.code-review-graph-rs/graph.db` with its own schema. An update scans supported files, hashes them and parses changed files. After a change it resolves calls across the stored facts in one SQLite transaction. On a large graph this trades update speed for simpler invalidation.
-- Review risk scoring, test-coverage inference, watch hooks, embeddings, and the rest of upstream’s MCP tools are outside this milestone. Graph agreement measures differences from the pinned Python implementation. Both implementations use static heuristics.
+## Verification
 
-## Measured agreement
-
-Across the 95 production Python files at the reference commit, the first implementation reproduced 3,248 of Python’s 4,756 distinct, directly bound caller–callee pairs (68.3%). Adding Python import resolution raised this to 3,881 (81.6%). Python contained 3,881 of the 3,883 pairs emitted by Rust. Of the 875 pairs only Python reported, 590 crossed a file boundary. These numbers measure agreement on one corpus. The checker below can reproduce the current result.
-
-## Reproduce the comparison
-
-Run these commands from `rust/`. Use a Python interpreter with the upstream project's dependencies installed. The test checks a fingerprint of the Python source and builds all test indexes in temporary directories.
+The comparison uses upstream commit `7ba9d17ab6fd281026b914d8da4c0dc98d013474`. From the repository root, create the reference environment and run the comparisons. An existing external checkout of that exact revision also works.
 
 ```sh
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo build --release --locked
-python tests/differential.py --upstream .. --binary target/release/code-review-graph-rs --whole-package
-python tests/mcp_stdio.py target/release/code-review-graph-rs
+git worktree add --detach ../crg-reference 7ba9d17ab6fd281026b914d8da4c0dc98d013474
+uv sync --project ../crg-reference --python 3.12 --frozen --no-dev
+make cutover REFERENCE=../crg-reference PYTHON=../crg-reference/.venv/bin/python
 ```
 
-The differential test checks TypeScript symbol ranges, direct call sites and caller queries across a clean build, rename, repeated update, deletion, and restoration. It also checks rollback after an unreadable-as-UTF-8 source file and compares selected queries on upstream Rust and Python examples. The whole-package option reports overlap across directly bound production Python caller–callee pairs, counting each pair once. The MCP test uses the official Python client over stdio.
+- `make check` runs rustfmt, Clippy with warnings denied, type checks, and native tests. Process tests launch the public binary with an empty executable search path.
+- `make parity` compares the proof binary with pinned Python on rebuild, incremental rename, duplicate notification, deletion, restoration, and direct caller queries. It also checks the official MCP client. The whole-package check requires exact equality of the distinct bound caller–callee pairs across all 95 upstream Python modules.
+- `make graph-parity` builds two independent public v15 databases from those 95 modules. It compares file hashes, symbol spans, declarations, duplicate edges, certainty attributes, flow members and scores, and community assignments. Timestamps and storage-specific row IDs are excluded from this graph comparison.
+- `make public-parity` runs both public command lines in separate processes on an identical fixture path. It compares stdout, stderr, exit codes, reads from a Python-built database, MCP protocol responses, prompts and tool descriptions. Its operation inventory reports entry points that still need behavioral fixtures.
+- `make cutover` runs all three comparisons and returns a failing status while any comparison or coverage requirement fails. The public and database reports are written to `target/parity/` by default. GitHub Actions runs the same replacement gate independently of its native build job.
 
-To repeat the architecture check, run `deslop-please` in this directory with `rust-analyzer` on your PATH.
+The native parser covers Python, Rust, JavaScript, TypeScript and TSX. Matching every directly bound caller–callee pair on the upstream Python package is one measured property. Full language coverage, edge evidence, installer and watcher behavior, optional integrations, embeddings, and the complete CLI and MCP contracts still require independent verification before retiring the Python implementation.
+
+For an architecture check, run `deslop-please` at the workspace root with `rust-analyzer` on the executable search path.

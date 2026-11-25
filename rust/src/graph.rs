@@ -11,7 +11,11 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 const APPLICATION_ID: i64 = 0x43524752; // "CRGR", distinct from the Python database.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+const CALL_SITES: &str = "CREATE TABLE call_sites (
+    source_file TEXT NOT NULL, source TEXT NOT NULL, raw_target TEXT NOT NULL,
+    target_file TEXT NOT NULL, target TEXT NOT NULL, line INTEGER NOT NULL,
+    PRIMARY KEY(source_file,source,raw_target,target_file,target,line))";
 const MODULE: &str = "<module>";
 const JS_EXTENSIONS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
@@ -49,6 +53,10 @@ fn validate(conn: &Connection) -> Result<()> {
 }
 
 impl Graph {
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
@@ -65,7 +73,15 @@ impl Graph {
             )?;
             if tables == 0 {
                 tx.execute_batch(SCHEMA)?;
+                tx.execute_batch(CALL_SITES)?;
                 tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            }
+            if tx.query_row("PRAGMA application_id", [], |r| r.get::<_, i64>(0))? == APPLICATION_ID
+                && tx.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? == 1
+            {
+                tx.execute_batch(CALL_SITES)?;
+                tx.execute("UPDATE files SET hash=''", [])?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
             validate(&tx)?;
@@ -347,6 +363,7 @@ type Target = (String, String);
 struct Module {
     facts: ParsedFile,
     symbol_counts: HashMap<String, usize>,
+    imported_files: BTreeSet<String>,
 }
 
 impl Module {
@@ -358,6 +375,7 @@ impl Module {
         Self {
             facts,
             symbol_counts,
+            imported_files: BTreeSet::new(),
         }
     }
 }
@@ -510,10 +528,10 @@ impl Resolver {
             .find(|p| self.modules.contains_key(p))
     }
 
-    fn resolve_binding(&self, file: &str, name: &str) -> Option<Target> {
+    fn resolve_binding(&self, origin: &str, name: &str, line: usize) -> Option<Target> {
         // A barrel can both traverse a cycle and reach the same declaration by
         // different routes. Track lookup states and compare terminal identities.
-        let mut pending = vec![(Binding::Local, file.to_owned(), name.to_owned())];
+        let mut pending = vec![(Binding::Local, origin.to_owned(), name.to_owned())];
         let mut seen = HashSet::new();
         let mut resolved = None;
         while let Some(state) = pending.pop() {
@@ -533,7 +551,23 @@ impl Resolver {
                         resolved = Some(target);
                         continue;
                     }
-                    let imports = &module.facts.imports;
+                    let local = module
+                        .facts
+                        .python
+                        .scoped_imports
+                        .iter()
+                        .filter(|i| {
+                            file == origin
+                                && i.start <= line
+                                && line <= i.end
+                                && import_suffix(&name, &i.binding.local).is_some()
+                        })
+                        .min_by_key(|i| i.end - i.start);
+                    let imports = if let Some(scoped) = local {
+                        std::slice::from_ref(&scoped.binding)
+                    } else {
+                        &module.facts.imports[..]
+                    };
                     let longest = imports
                         .iter()
                         .filter(|i| import_suffix(&name, &i.local).is_some())
@@ -576,8 +610,118 @@ impl Resolver {
         resolved
     }
 
-    fn resolve(&self, file: &str, caller: &str, name: &str) -> Option<Target> {
+    fn python_member(&self, file: &str, member: &crate::model::PythonMember) -> Option<Target> {
+        use crate::model::PythonType;
+        let class = match &member.receiver {
+            PythonType::Named(annotation) => {
+                self.resolve_binding(file, annotation_name(annotation, None)?, member.line)?
+            }
+            PythonType::Returned { callee, element } => {
+                let callee = self.resolve(file, &member.caller, callee, member.line)?;
+                let module = &self.modules[&callee.0];
+                if module
+                    .facts
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == callee.1 && s.kind == "Class")
+                {
+                    if element.is_some() {
+                        return None;
+                    }
+                    callee
+                } else {
+                    let definition = module.facts.python.definitions.get(&callee.1)?;
+                    let annotation = annotation_name(definition.returns.as_deref()?, *element)?;
+                    if definition.parent.is_some() {
+                        return None;
+                    }
+                    let result = self.resolve_binding(&callee.0, annotation, 0)?;
+                    if result.0 != file && !self.modules[file].imported_files.contains(&result.0) {
+                        return None;
+                    }
+                    result
+                }
+            }
+        };
+        let mut pending = vec![class];
+        let mut seen = HashSet::new();
+        while let Some((path, class)) = pending.pop() {
+            if !seen.insert((path.clone(), class.clone())) {
+                continue;
+            }
+            let module = &self.modules[&path];
+            let method = format!("{class}.{}", member.attr);
+            if let Some(def) = module.facts.python.definitions.get(&method) {
+                if !member.property
+                    || def
+                        .modifiers
+                        .as_deref()
+                        .is_some_and(|m| m.split(',').any(|v| v == "property"))
+                {
+                    return Some((path, method));
+                }
+                return None;
+            }
+            for base in module
+                .facts
+                .python
+                .definitions
+                .get(&class)?
+                .bases
+                .iter()
+                .rev()
+            {
+                if let Some(parent) = self.resolve_binding(&path, base, 0) {
+                    pending.push(parent);
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve(&self, file: &str, caller: &str, name: &str, line: usize) -> Option<Target> {
+        if file.ends_with(".rs")
+            && let Some((class, method)) = name.rsplit_once("::")
+        {
+            return self.resolve_binding(file, &format!("{class}.{method}"), line);
+        }
         // A nested definition shadows outer bindings. Sibling methods require a receiver.
+        if file.ends_with(".py") {
+            let module = &self.modules[file];
+            if !name.contains('.')
+                && let Some(symbol) = module
+                    .facts
+                    .symbols
+                    .iter()
+                    .find(|s| s.name.rsplit('.').next() == Some(name))
+            {
+                if module.facts.python.ambiguities.contains(&symbol.name) {
+                    return (caller.split(":S").next() == Some(symbol.name.as_str()))
+                        .then(|| (file.to_owned(), caller.to_owned()));
+                }
+                return Some((file.to_owned(), symbol.name.clone()));
+            }
+            if module.facts.python.ambiguities.contains(name) {
+                return (caller.split(":S").next() == Some(name))
+                    .then(|| (file.to_owned(), caller.to_owned()));
+            }
+            if name.contains('.') {
+                return self.resolve_binding(file, name, line);
+            }
+            if let Some(target) = self.resolve_binding(file, name, 0) {
+                return Some(target);
+            }
+            let mut candidates = module.imported_files.iter().flat_map(|path| {
+                self.modules[path]
+                    .facts
+                    .symbols
+                    .iter()
+                    .filter(move |s| s.name.rsplit('.').next() == Some(name))
+                    .map(move |s| (path.clone(), s.name.clone()))
+            });
+            let first = candidates.next()?;
+            return candidates.next().is_none().then_some(first);
+        }
         let mut scope = caller;
         loop {
             let qualified = format!("{scope}.{name}");
@@ -597,8 +741,52 @@ impl Resolver {
             }
             scope = parent;
         }
-        self.resolve_binding(file, name)
+        self.resolve_binding(file, name, line)
     }
+}
+
+fn annotation_name(annotation: &str, index: Option<usize>) -> Option<&str> {
+    let value = annotation.trim().trim_matches(['\'', '"']).trim();
+    if let Some(index) = index {
+        let items = value
+            .strip_prefix("tuple[")
+            .or_else(|| value.strip_prefix("Tuple["))?
+            .strip_suffix(']')?;
+        let mut depth = 0;
+        let mut start = 0;
+        let mut position = 0;
+        for (i, c) in items
+            .char_indices()
+            .chain(std::iter::once((items.len(), ',')))
+        {
+            match c {
+                '[' | '(' => depth += 1,
+                ']' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    if position == index {
+                        return annotation_name(&items[start..i], None);
+                    }
+                    position += 1;
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    if let Some(inner) = value
+        .strip_prefix("Optional[")
+        .or_else(|| value.strip_prefix("typing.Optional["))
+        .and_then(|v| v.strip_suffix(']'))
+    {
+        return annotation_name(inner, None);
+    }
+    if value.contains('|') {
+        let mut options = value.split('|').map(str::trim).filter(|s| *s != "None");
+        let first = options.next()?;
+        return options.next().is_none().then_some(first);
+    }
+    Some(value)
 }
 
 fn resolve_graph(tx: &Transaction<'_>) -> Result<()> {
@@ -612,23 +800,60 @@ fn resolve_graph(tx: &Transaction<'_>) -> Result<()> {
             .with_context(|| format!("reading stored facts for {file}"))?;
         modules.insert(file, Module::new(facts));
     }
-    let resolver = Resolver { modules };
+    let mut resolver = Resolver { modules };
+    let imports: Vec<_> = resolver
+        .modules
+        .iter()
+        .filter(|(file, _)| file.ends_with(".py"))
+        .map(|(file, module)| {
+            let targets = module
+                .facts
+                .imports
+                .iter()
+                .chain(
+                    module
+                        .facts
+                        .python
+                        .scoped_imports
+                        .iter()
+                        .map(|i| &i.binding),
+                )
+                .filter_map(|i| {
+                    resolver.python_file(&python_base(
+                        file,
+                        &i.module,
+                        resolver.modules.contains_key("__init__.py"),
+                    )?)
+                })
+                .collect();
+            (file.clone(), targets)
+        })
+        .collect();
+    for (file, targets) in imports {
+        resolver.modules.get_mut(&file).unwrap().imported_files = targets;
+    }
     tx.execute("DELETE FROM calls", [])?;
-    let mut insert = tx.prepare_cached("INSERT OR IGNORE INTO calls VALUES(?,?,?,?,?)")?;
+    tx.execute("DELETE FROM call_sites", [])?;
+    let mut edges = tx.prepare_cached("INSERT OR IGNORE INTO calls VALUES(?,?,?,?,?)")?;
+    let mut sites = tx.prepare_cached("INSERT OR IGNORE INTO call_sites VALUES(?,?,?,?,?,?)")?;
     for (file, module) in &resolver.modules {
+        let mut add = |caller: &str, raw: &str, target: Target, line: usize| -> Result<()> {
+            let line = i64::try_from(line)?;
+            edges.execute(params![file, caller, target.0, target.1, line])?;
+            sites.execute(params![file, caller, raw, target.0, target.1, line])?;
+            Ok(())
+        };
         for call in &module.facts.calls {
             if call.caller != MODULE && module.symbol_counts.get(&call.caller) != Some(&1) {
                 continue;
             }
-            if let Some((target_file, target)) = resolver.resolve(file, &call.caller, &call.callee)
-            {
-                insert.execute(params![
-                    file,
-                    call.caller,
-                    target_file,
-                    target,
-                    i64::try_from(call.line)?
-                ])?;
+            if let Some(target) = resolver.resolve(file, &call.caller, &call.callee, call.line) {
+                add(&call.caller, &call.callee, target, call.line)?;
+            }
+        }
+        for member in &module.facts.python.members {
+            if let Some(target) = resolver.python_member(file, member) {
+                add(&member.caller, &member.raw, target, member.line)?;
             }
         }
     }

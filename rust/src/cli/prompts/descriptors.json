@@ -1,0 +1,70 @@
+[
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "arguments": [
+      {
+        "description": "Git ref to diff against. Default: HEAD~1.\n\nProvide a value matching the following JSON schema: {\"type\":\"string\"}. Encode non-string values as JSON.",
+        "name": "base",
+        "required": false
+      }
+    ],
+    "description": "Pre-commit review workflow using detect_changes, affected_flows, and test gaps.\n\nProduces a structured code review with risk levels and actionable findings.",
+    "name": "review_changes"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "arguments": [],
+    "description": "Architecture documentation using communities, flows, and Mermaid diagrams.\n\nGenerates a comprehensive architecture map with module summaries and coupling warnings.",
+    "name": "architecture_map"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "arguments": [
+      {
+        "description": "Description of the issue to debug.\n\nProvide a value matching the following JSON schema: {\"type\":\"string\"}. Encode non-string values as JSON.",
+        "name": "description",
+        "required": false
+      }
+    ],
+    "description": "Guided debugging using search, flow tracing, and recent changes.\n\nSystematic debugging workflow that traces execution paths and identifies root causes.",
+    "name": "debug_issue"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "arguments": [],
+    "description": "New developer orientation using stats, architecture, and critical flows.\n\nCreates an onboarding guide covering codebase structure, key modules, and patterns.",
+    "name": "onboard_developer"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "arguments": [
+      {
+        "description": "Git ref to diff against. Default: HEAD~1.\n\nProvide a value matching the following JSON schema: {\"type\":\"string\"}. Encode non-string values as JSON.",
+        "name": "base",
+        "required": false
+      }
+    ],
+    "description": "PR readiness check with risk scoring, test gaps, and dead code detection.\n\nProduces a merge readiness report with risk assessment and recommendations.",
+    "name": "pre_merge_check"
+  }
+]

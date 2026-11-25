@@ -110,3 +110,6 @@ scratch/
 
 # Maintainer-only local agent rules
 CLAUDE.local.md
+
+/target/
+/.code-review-graph-rs/

@@ -1,0 +1,10 @@
+{
+  "": "usage: crg-daemon [-h] {start,stop,restart,status,logs,add,remove} ...\n\nMulti-repo watch daemon for code-review-graph\n\npositional arguments:\n  {start,stop,restart,status,logs,add,remove}\n    start               Start the daemon\n    stop                Stop the daemon\n    restart             Restart the daemon\n    status              Show daemon status and configuration\n    logs                Show daemon or per-repo logs\n    add                 Add a repository to the daemon config\n    remove              Remove a repository from the daemon config\n\noptions:\n  -h, --help            show this help message and exit\n",
+  "start": "usage: crg-daemon start [-h] [--foreground]\n\noptions:\n  -h, --help    show this help message and exit\n  --foreground  Run in the foreground instead of daemonizing\n",
+  "stop": "usage: crg-daemon stop [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "restart": "usage: crg-daemon restart [-h] [--foreground]\n\noptions:\n  -h, --help    show this help message and exit\n  --foreground  Run in the foreground instead of daemonizing\n",
+  "status": "usage: crg-daemon status [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "logs": "usage: crg-daemon logs [-h] [--repo ALIAS] [--follow] [--lines LINES]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo ALIAS          Show logs for a specific repo (by alias)\n  --follow, -f          Follow log output (tail -f)\n  --lines LINES, -n LINES\n                        Number of lines to show (default: 50)\n",
+  "add": "usage: crg-daemon add [-h] [--alias ALIAS] path\n\npositional arguments:\n  path           Path to the repository\n\noptions:\n  -h, --help     show this help message and exit\n  --alias ALIAS  Short alias for the repository (default: directory name)\n",
+  "remove": "usage: crg-daemon remove [-h] path_or_alias\n\npositional arguments:\n  path_or_alias  Repository path or alias to remove\n\noptions:\n  -h, --help     show this help message and exit\n"
+}

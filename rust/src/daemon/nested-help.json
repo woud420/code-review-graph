@@ -1,0 +1,10 @@
+{
+  "": "usage: code-review-graph daemon [-h]\n                                {start,stop,restart,status,logs,add,remove}\n                                ...\n\npositional arguments:\n  {start,stop,restart,status,logs,add,remove}\n    start               Start the watch daemon\n    stop                Stop the watch daemon\n    restart             Restart the watch daemon\n    status              Show daemon and watcher status\n    logs                View daemon or watcher logs\n    add                 Add a repo to the watch config\n    remove              Remove a repo from the watch config\n\noptions:\n  -h, --help            show this help message and exit\n",
+  "start": "usage: code-review-graph daemon start [-h] [--foreground]\n\noptions:\n  -h, --help    show this help message and exit\n  --foreground  Run in the foreground instead of in the background\n",
+  "stop": "usage: code-review-graph daemon stop [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "restart": "usage: code-review-graph daemon restart [-h] [--foreground]\n\noptions:\n  -h, --help    show this help message and exit\n  --foreground  Run in the foreground instead of in the background\n",
+  "status": "usage: code-review-graph daemon status [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "logs": "usage: code-review-graph daemon logs [-h] [--repo REPO] [--follow]\n                                     [--lines LINES]\n\noptions:\n  -h, --help     show this help message and exit\n  --repo REPO    Show logs for a specific repo alias\n  --follow       Follow log output (tail -f)\n  --lines LINES  Number of lines to show (default: 50)\n",
+  "add": "usage: code-review-graph daemon add [-h] [--alias ALIAS] path\n\npositional arguments:\n  path           Path to the repository\n\noptions:\n  -h, --help     show this help message and exit\n  --alias ALIAS  Short alias for the repo\n",
+  "remove": "usage: code-review-graph daemon remove [-h] path_or_alias\n\npositional arguments:\n  path_or_alias  Repository path or alias to remove\n\noptions:\n  -h, --help     show this help message and exit\n"
+}

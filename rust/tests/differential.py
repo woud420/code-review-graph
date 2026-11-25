@@ -39,7 +39,7 @@ def equal(label, actual, expected):
         raise AssertionError(f"{label}\n  expected {expected!r}\n  received {actual!r}")
 
 
-def load_reference(source):
+def verify_source(source):
     package = source / "code_review_graph"
     digest = hashlib.sha256()
     files = sorted(package.rglob("*.py"))
@@ -48,6 +48,11 @@ def load_reference(source):
         digest.update(path.relative_to(source).as_posix().encode() + b"\0")
         digest.update(hashlib.sha256(path.read_bytes()).digest())
     equal(f"Python source fingerprint at {UPSTREAM_REV}", digest.hexdigest(), PYTHON_SOURCE_DIGEST)
+
+
+def load_reference(source):
+    verify_source(source)
+    package = source / "code_review_graph"
     sys.path.insert(0, str(source))
     from code_review_graph.tools.build import build_or_update_graph
     from code_review_graph.tools.query import query_graph
@@ -212,6 +217,7 @@ def report_package_overlap(repo):
         print(f"  {label}: {cross} cross-file and {len(pairs) - cross} same-file pairs")
         for src, dst in sorted(pairs)[:2]:
             print(f"    {src} -> {dst}")
+    equal("all distinct directly bound production Python caller/callee pairs", candidate, reference)
 
 
 def check_upstream_examples(binary, source, tmp, build, query, whole_package):

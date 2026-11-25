@@ -1,0 +1,42 @@
+name: Rust port
+
+on:
+  push:
+    branches: [rust-port-proof]
+  pull_request:
+    paths: ['rust/**', 'Cargo.*', 'rust-toolchain.toml', 'Makefile', '.github/workflows/rust.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Native build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make check
+      - run: make build
+      - run: cargo package --locked -p code-review-graph-rs
+
+  compatibility:
+    name: Python replacement gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: tirth8205/code-review-graph
+          ref: 7ba9d17ab6fd281026b914d8da4c0dc98d013474
+          path: reference
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --project reference --python 3.12 --frozen --no-dev
+      - run: make cutover REFERENCE=reference PYTHON=reference/.venv/bin/python
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: parity-reports
+          path: target/parity/*.json
+          if-no-files-found: warn

@@ -18,10 +18,10 @@ async def check(binary: Path, repo: Path) -> None:
         assert info.capabilities.tools is not None
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
         assert set(tools) == {"list_graph_stats_tool", "query_graph_tool"}
-        assert all(tool.annotations.readOnlyHint for tool in tools.values())
+        assert all(tool.annotations.model_dump(by_alias=True)["readOnlyHint"] for tool in tools.values())
 
         missing = await client.call_tool("list_graph_stats_tool", {})
-        assert missing.isError
+        assert missing.is_error
         assert not (repo / ".code-review-graph-rs").exists()
 
         (repo / "lib.ts").write_text("export function target() {}\n")
@@ -31,7 +31,7 @@ async def check(binary: Path, repo: Path) -> None:
         )
         subprocess.run([binary, "--repo", repo, "build"], capture_output=True, check=True)
         stats = await client.call_tool("list_graph_stats_tool", {})
-        assert not stats.isError and stats.structuredContent["files"] == 2
+        assert not stats.is_error and stats.structured_content["files"] == 2
 
         for pattern, target, expected in [
             ("callers_of", "lib.ts::target", "outer"),
@@ -39,9 +39,9 @@ async def check(binary: Path, repo: Path) -> None:
         ]:
             args = {"pattern": pattern, "target": target}
             answer = await client.call_tool("query_graph_tool", args)
-            assert not answer.isError
-            assert json.loads(answer.content[0].text) == answer.structuredContent
-            assert [hit["name"] for hit in answer.structuredContent["results"]] == [expected]
+            assert not answer.is_error
+            assert json.loads(answer.content[0].text) == answer.structured_content
+            assert [hit["name"] for hit in answer.structured_content["results"]] == [expected]
 
 
 if __name__ == "__main__":
