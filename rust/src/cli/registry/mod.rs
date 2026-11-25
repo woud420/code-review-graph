@@ -1,5 +1,7 @@
+mod search;
 use anyhow::{Context, Result};
 pub use code_review_graph_rs::registry::list;
+pub(super) use search::run as cross_search;
 use std::path::Path;
 pub fn register(path: &Path, alias: Option<String>) -> Result<()> {
     let entry = code_review_graph_rs::registry::register_repo(path, alias)?;

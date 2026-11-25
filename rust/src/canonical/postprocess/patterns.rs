@@ -61,36 +61,6 @@ pub(super) static ENTRY: LazyLock<RegexSet> = LazyLock::new(|| {
 pub(super) static PHP_ENTRY: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new([r#"^(boot|register)$"#, r#"^__invoke$"#]).expect("valid built-in patterns")
 });
-pub(super) static TEST_FILENAME: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new([
-        r#"^test_.*\.py$"#,
-        r#"_test\.py$"#,
-        r#"^conftest\.py$"#,
-        r#"\.(?:test|spec)\.[cm]?[jt]sx?$"#,
-        r#"\.stories\.[jt]sx?$"#,
-        r#"_test\.go$"#,
-        r#"_(?:test|spec)\.rb$"#,
-        r#"[a-z0-9]Tests?\.(?:java|kt|kts|scala|groovy)$"#,
-        r#"[a-z0-9]Tests?\.cs$"#,
-        r#"[a-z0-9]Test\.php$"#,
-        r#"_test\.dart$"#,
-        r#"^test[_-].*\.[rR]$"#,
-        r#"(?i)\.tests\.ps1$"#,
-        r#"[_.]test\.resi?$"#,
-        r#"^runtests\.jl$"#,
-    ])
-    .expect("valid built-in patterns")
-});
-pub(super) static TEST_DIR: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new([
-        r#"(?:^|[\\/])tests[\\/]"#,
-        r#"(?:^|[\\/])__tests__[\\/]"#,
-        r#"(?:^|[\\/])e2e[_-]?tests?[\\/]"#,
-        r#"(?:^|[\\/])testthat[\\/]"#,
-        r#"(?:^|[\\/])specs?[\\/].*\.(?:rb|rake)$"#,
-    ])
-    .expect("valid built-in patterns")
-});
 pub(super) const SECURITY: &[&str] = &[
     "admin",
     "auth",

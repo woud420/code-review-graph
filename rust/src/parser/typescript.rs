@@ -258,10 +258,14 @@ impl<'s> Extractor<'s> {
     }
 
     fn record_call(&mut self, node: Node<'_>, scope: &str, class: &str) -> Option<String> {
-        let target = node
-            .child_by_field_name("function")
-            .or_else(|| node.child_by_field_name("constructor"))?;
-        let reference = self.reference(target)?;
+        let target = node.child_by_field_name("function")?;
+        let reference = if let Some(reference) = self.reference(target) {
+            reference
+        } else {
+            let property = target.child_by_field_name("property")?;
+            self.call(scope, self.text(property), node);
+            return None;
+        };
         if self.module_call(node, &reference) {
             return None;
         }
@@ -300,17 +304,44 @@ impl<'s> Extractor<'s> {
                     None => format!("{base}@L{line}"),
                 };
                 self.symbol(node, "Test", &name);
+                if scope != "<module>" {
+                    self.file
+                        .typescript
+                        .containers
+                        .insert(name.clone(), scope.to_owned());
+                }
                 return Some(name);
             }
         }
-        if let Some(method) = reference
+        let raw = reference
             .strip_prefix("this.")
             .filter(|_| !class.is_empty())
-        {
-            self.call(scope, &format!("{class}.{method}"), node);
-        } else {
-            self.call(scope, &reference, node);
+            .map(|method| format!("{class}.{method}"))
+            .unwrap_or_else(|| reference.clone());
+        if let Some((prefix, _)) = reference.rsplit_once('.') {
+            let mut evidence = serde_json::json!({"member_call":reference});
+            if !prefix.contains('.') {
+                evidence["receiver"] = serde_json::json!(prefix);
+            } else if let Some(field) = prefix
+                .strip_prefix("this.")
+                .filter(|name| !name.contains('.'))
+            {
+                evidence["receiver"] = serde_json::json!(field);
+            }
+            if let Some(receiver) = evidence["receiver"].as_str()
+                && let Some(ty) = parameter_type(node, receiver, self.source)
+            {
+                evidence["receiver_type"] = serde_json::json!(ty);
+                evidence["receiver_resolution"] = serde_json::json!("typed_receiver_unresolved");
+            }
+            self.file.typescript.members.push((
+                scope.to_owned(),
+                raw.clone(),
+                node.start_position().row + 1,
+                evidence,
+            ));
         }
+        self.call(scope, &raw, node);
         None
     }
 
@@ -335,6 +366,30 @@ impl<'s> Extractor<'s> {
                         class = name.to_owned();
                         caller.clone_from(&class);
                         self.symbol(node, "Class", &class);
+                        if matches!(
+                            node.kind(),
+                            "interface_declaration" | "type_alias_declaration"
+                        ) {
+                            self.file.typescript.kinds.insert(
+                                class.clone(),
+                                serde_json::json!({"typescript_kind":node.kind()}),
+                            );
+                        }
+                        for base in nested
+                            .iter()
+                            .filter(|n| n.kind() == "class_heritage")
+                            .flat_map(|n| children(*n))
+                            .filter(|n| n.kind() == "extends_clause")
+                            .filter_map(|n| n.child_by_field_name("value"))
+                        {
+                            let base = self.text(base).to_owned();
+                            self.file
+                                .typescript
+                                .bases
+                                .entry(class.clone())
+                                .or_default()
+                                .push(base);
+                        }
                     }
                 }
                 "function_declaration"
@@ -395,6 +450,15 @@ impl<'s> Extractor<'s> {
                         self.call(&caller, &target, node);
                     }
                 }
+                "identifier" | "shorthand_property_identifier" | "type_identifier"
+                    if is_value_or_type_reference(node) =>
+                {
+                    self.file.typescript.references.push((
+                        caller.clone(),
+                        self.text(node).to_owned(),
+                        node.start_position().row + 1,
+                    ));
+                }
                 "if_statement" => {
                     if let Some(mut cond) = node.child_by_field_name("condition") {
                         while cond.kind() == "parenthesized_expression" {
@@ -418,6 +482,61 @@ impl<'s> Extractor<'s> {
                     .map(|child| (child, caller.clone(), class.clone())),
             );
         }
+    }
+}
+
+fn parameter_type<'s>(node: Node<'_>, receiver: &str, source: &'s str) -> Option<&'s str> {
+    let mut cursor = node.parent();
+    while let Some(scope) = cursor {
+        if let Some(params) = scope.child_by_field_name("parameters") {
+            for param in children(params) {
+                if param
+                    .child_by_field_name("pattern")
+                    .is_some_and(|id| &source[id.byte_range()] == receiver)
+                {
+                    let ty = param.child_by_field_name("type")?.named_child(0)?;
+                    return (ty.kind() == "type_identifier").then(|| &source[ty.byte_range()]);
+                }
+            }
+        }
+        cursor = scope.parent();
+    }
+    None
+}
+
+fn is_value_or_type_reference(node: Node<'_>) -> bool {
+    let Some(p) = node.parent() else {
+        return false;
+    };
+    if node.kind() == "type_identifier" {
+        return std::iter::successors(Some(p), |n| n.parent())
+            .take_while(|n| {
+                matches!(
+                    n.kind(),
+                    "type_annotation"
+                        | "union_type"
+                        | "array_type"
+                        | "type_arguments"
+                        | "generic_type"
+                        | "intersection_type"
+                        | "object_type"
+                )
+            })
+            .any(|n| n.kind() == "type_annotation");
+    }
+    if node.kind() == "shorthand_property_identifier" {
+        return true;
+    }
+    match p.kind() {
+        "arguments" | "array" => true,
+        "pair" => p.child_by_field_name("value") == Some(node),
+        "assignment_expression" => {
+            p.child_by_field_name("right") == Some(node)
+                && p.child_by_field_name("left").is_some_and(|n| {
+                    matches!(n.kind(), "member_expression" | "subscript_expression")
+                })
+        }
+        _ => false,
     }
 }
 

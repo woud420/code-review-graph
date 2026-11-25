@@ -1,14 +1,30 @@
+pub mod cfamily;
+pub mod go;
+pub mod json;
+mod test_paths;
+pub mod typescript;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use test_paths::test_file;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ParsedFile {
+    #[serde(default)]
+    pub typescript: typescript::TypeScriptFacts,
+    #[serde(default)]
+    pub bash_imports: Vec<(usize, String)>,
     pub symbols: Vec<Symbol>,
     pub calls: Vec<Call>,
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
     #[serde(default)]
     pub python: PythonFacts,
+    #[serde(default)]
+    pub json: json::JsonFacts,
+    #[serde(default)]
+    pub go: go::GoFacts,
+    #[serde(default)]
+    pub cfamily: cfamily::CFamily,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +33,10 @@ pub struct PythonFacts {
     pub definitions: BTreeMap<String, PythonDefinition>,
     pub ambiguities: BTreeSet<String>,
     pub members: Vec<PythonMember>,
+    #[serde(default)]
+    pub receivers: Vec<PythonReceiver>,
+    #[serde(default)]
+    pub fields: BTreeMap<String, Vec<PythonType>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +48,8 @@ pub struct ScopedImport {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct PythonDefinition {
+    #[serde(default)]
+    pub module_level: bool,
     pub parent: Option<String>,
     pub params: Option<String>,
     pub returns: Option<String>,
@@ -47,8 +69,21 @@ pub struct PythonMember {
     pub property: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PythonReceiver {
+    pub caller: String,
+    pub line: usize,
+    pub raw: String,
+    pub name: Option<String>,
+    pub binding: Option<PythonType>,
+    #[serde(default)]
+    pub declared: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PythonType {
+    Builtin,
+    Parameter(String),
     Named(String),
     Returned {
         callee: String,

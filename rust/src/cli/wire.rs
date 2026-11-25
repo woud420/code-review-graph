@@ -31,7 +31,7 @@ pub fn json_text(value: &Value, pretty: bool) -> String {
     text
 }
 
-fn python_repr(v: &Value) -> String {
+pub(super) fn value_repr(v: &Value) -> String {
     match v {
         Value::String(s) => {
             let quote = if s.contains('\'') && !s.contains('"') {
@@ -61,15 +61,15 @@ fn python_repr(v: &Value) -> String {
         }
         Value::Array(items) => format!(
             "[{}]",
-            items.iter().map(python_repr).collect::<Vec<_>>().join(", ")
+            items.iter().map(value_repr).collect::<Vec<_>>().join(", ")
         ),
         Value::Object(map) => format!(
             "{{{}}}",
             map.iter()
                 .map(|(k, v)| format!(
                     "{}: {}",
-                    python_repr(&Value::String(k.clone())),
-                    python_repr(v)
+                    value_repr(&Value::String(k.clone())),
+                    value_repr(v)
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -81,7 +81,7 @@ fn python_repr(v: &Value) -> String {
 }
 
 pub fn dict_repr(map: &serde_json::Map<String, Value>) -> String {
-    let raw = python_repr(&Value::Object(map.clone()));
+    let raw = value_repr(&Value::Object(map.clone()));
     let chars: Vec<_> = raw.chars().collect();
     if chars.len() > 50 {
         format!(

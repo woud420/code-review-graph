@@ -41,6 +41,9 @@ fn call(
     args: Map<String, Value>,
     hints: &reports::Hints,
 ) -> Result<Value> {
+    if name == "cross_repo_search_tool" {
+        return registry::cross_search(&Value::Object(args));
+    }
     if name == "list_repos_tool" {
         let repos = registry::list()?;
         return Ok(
@@ -52,6 +55,13 @@ fn call(
         None => root.to_owned(),
     };
     let data = Value::Object(args);
+    if name == "build_or_update_graph_tool" {
+        return with_provenance(
+            super::build::run(&root, &data)?,
+            &store::database(&root, None),
+            &root,
+        );
+    }
     if name == "get_docs_section_tool" {
         return Ok(docs(
             data["section_name"]
@@ -110,9 +120,29 @@ fn attach_provenance(mut result: Value, conn: &rusqlite::Connection, root: &Path
 
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_prompts().build())
-            .with_server_info(Implementation::new("code-review-graph","2.4.0"))
-            .with_instructions("Read a local code knowledge graph. Use query_graph_tool for callers and callees, list_graph_stats_tool for index counts, or get_docs_section_tool for the reference.")
+        serde_json::from_str(include_str!("../../assets/cli/server.json"))
+            .expect("bundled server information")
+    }
+    #[allow(
+        deprecated,
+        reason = "Protocol 2025-11-25 exposes logging/setLevel in the pinned server"
+    )]
+    async fn set_level(
+        &self,
+        _: SetLevelRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        Ok(())
+    }
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        Err(ErrorData::invalid_params(
+            format!("Resource not found: '{}'", request.uri),
+            Some(json!({"uri":request.uri})),
+        ))
     }
     async fn on_custom_request(
         &self,
@@ -197,7 +227,7 @@ pub fn serve(root: &Path) -> Result<()> {
     let server = Server {
         root: root.to_owned(),
         hints: Arc::default(),
-        tools: serde_json::from_str(include_str!("tools.json"))?,
+        tools: serde_json::from_str(include_str!("../../assets/cli/tools.json"))?,
     };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

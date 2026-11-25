@@ -6,6 +6,7 @@ use std::path::PathBuf;
     name = "code-review-graph",
     version = "2.4.0",
     disable_version_flag = true,
+    disable_help_subcommand = true,
     about = "Read an upstream code graph and index supported source files in Rust"
 )]
 pub struct Cli {
@@ -52,6 +53,17 @@ pub enum Command {
     },
     /// Remove a registered repository.
     Unregister { path_or_alias: String },
+    /// Show the opt-in context savings log.
+    ContextHistory {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long, default_value = "day", value_parser = ["day", "tool"])]
+        by: String,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        days: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show graph statistics.
     Status {
         #[command(flatten)]
@@ -83,6 +95,43 @@ pub enum Command {
         limit: i64,
         #[arg(long)]
         repo: Option<PathBuf>,
+    },
+    /// Analyse the blast radius of changes.
+    Impact {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long,num_args=1..)]
+        files: Option<Vec<String>>,
+        #[arg(long,default_value_t=2,value_parser=clap::value_parser!(i64).range(0..))]
+        depth: i64,
+        #[arg(long,default_value_t=500,value_parser=clap::value_parser!(i64).range(1..))]
+        max_results: i64,
+        #[arg(long,default_value_t=25,value_parser=clap::value_parser!(i64).range(1..))]
+        max_files: i64,
+        #[arg(long, default_value = "HEAD~1")]
+        base: String,
+        #[arg(long,default_value="standard",value_parser=["standard","minimal","compact"])]
+        detail_level: String,
+    },
+    /// Show architecture and cross-community coupling.
+    Architecture {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long,default_value="minimal",value_parser=["minimal","standard"])]
+        detail_level: String,
+    },
+    /// Find oversized graph nodes.
+    LargeFunctions {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long,default_value_t=50,value_parser=clap::value_parser!(i64).range(1..))]
+        min_lines: i64,
+        #[arg(long,value_parser=["Function","Class","File","Test"])]
+        kind: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long,default_value_t=50,value_parser=clap::value_parser!(i64).range(1..))]
+        limit: i64,
     },
     /// List stored execution flows.
     Flows {
@@ -142,6 +191,21 @@ pub fn parse() -> Cli {
         Err(error) => {
             let context = |key| error.get(key).map(ToString::to_string).unwrap_or_default();
             match error.kind() {
+                ErrorKind::DisplayHelp => {
+                    // Keep the documented argparse layout for the commands that accept the same options.
+                    let pages: std::collections::BTreeMap<String, String> =
+                        serde_json::from_str(include_str!("../../assets/cli/help.json"))
+                            .expect("bundled CLI help");
+                    if let Some(page) = argv
+                        .get(1)
+                        .and_then(|s| s.to_str())
+                        .and_then(|cmd| pages.get(cmd))
+                    {
+                        print!("{page}");
+                        std::process::exit(0);
+                    }
+                    error.exit();
+                }
                 ErrorKind::InvalidSubcommand => {
                     let word = context(ContextKind::InvalidSubcommand);
                     let close = context(ContextKind::SuggestedSubcommand);

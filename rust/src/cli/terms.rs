@@ -224,7 +224,10 @@ pub fn language_gap(language: &str, pattern: &str) -> Option<&'static str> {
         ("php", "importers_of" | "imports_of") => Some(
             "php dynamic include/require paths are not evaluated, so importers can be missing here (#819)",
         ),
-        ("php", "advised_by" | "advises" | "callees_of" | "callers_of" | "tests_for") => Some(
+        (
+            "php",
+            "advised_by" | "advises" | "callees_of" | "callers_of" | "impact_radius" | "tests_for",
+        ) => Some(
             "php container-resolved and constructor-injected calls are not statically traced, so callers can be missing (#850, #851)",
         ),
         ("javascript" | "tsx" | "typescript", "endpoints_for" | "handlers_of") => Some(
@@ -235,20 +238,29 @@ pub fn language_gap(language: &str, pattern: &str) -> Option<&'static str> {
         ),
         (
             "javascript" | "tsx" | "typescript",
-            "advised_by" | "advises" | "callees_of" | "callers_of" | "tests_for",
+            "advised_by" | "advises" | "callees_of" | "callers_of" | "impact_radius" | "tests_for",
         ) => Some(
             "js/ts callbacks land on REFERENCES not CALLS, and obj[name]() is unresolved, so callers can be missing",
         ),
-        ("java", "advised_by" | "advises" | "callees_of" | "callers_of" | "tests_for") => Some(
+        (
+            "java",
+            "advised_by" | "advises" | "callees_of" | "callers_of" | "impact_radius" | "tests_for",
+        ) => Some(
             "java aop pointcuts (within/args/target/this, cross-aspect refs, compound booleans) and reflective calls are not resolved (#592)",
         ),
         ("go", "inheritors_of") => Some(
             "go interface satisfaction is structural, never declared, so implementers can be missing from inheritors_of",
         ),
-        ("csharp", "advised_by" | "advises" | "callees_of" | "callers_of" | "tests_for") => Some(
+        (
+            "csharp",
+            "advised_by" | "advises" | "callees_of" | "callers_of" | "impact_radius" | "tests_for",
+        ) => Some(
             "c# di-container registrations are not statically traced, so interface-typed callers can be missing here",
         ),
-        ("python", "advised_by" | "advises" | "callees_of" | "callers_of" | "tests_for") => Some(
+        (
+            "python",
+            "advised_by" | "advises" | "callees_of" | "callers_of" | "impact_radius" | "tests_for",
+        ) => Some(
             "python getattr dispatch and decorator-based registration are not statically traced, so callers can be missing here",
         ),
         _ => None,

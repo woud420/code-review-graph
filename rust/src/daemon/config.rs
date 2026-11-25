@@ -261,7 +261,6 @@ pub(super) fn add(home: &Path, input: &Path, alias: Option<String>) -> Result<()
         input.display(),
         displayed
     );
-    changed(home)?;
     Ok(())
 }
 
@@ -280,15 +279,7 @@ pub(super) fn remove(home: &Path, value: &str) -> Result<bool> {
     }
     save(home, &c)?;
     println!("Removed repository: {value}");
-    changed(home)?;
     Ok(true)
-}
-
-fn changed(home: &Path) -> Result<()> {
-    if super::lifecycle::running(home)?.is_some() {
-        println!("Daemon will pick up the change automatically.");
-    }
-    Ok(())
 }
 
 pub(super) fn log_file(config: &Config, alias: Option<&str>) -> Result<PathBuf> {

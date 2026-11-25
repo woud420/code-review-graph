@@ -1,0 +1,21 @@
+{
+  "protocolVersion": "2025-11-25",
+  "capabilities": {
+    "logging": {},
+    "prompts": {
+      "listChanged": true
+    },
+    "resources": {
+      "subscribe": false,
+      "listChanged": true
+    },
+    "tools": {
+      "listChanged": true
+    }
+  },
+  "serverInfo": {
+    "name": "code-review-graph",
+    "version": "2.4.0"
+  },
+  "instructions": "Code knowledge graph of this repo (Tree-sitter AST + call / import / test edges). Use it whenever the question is about RELATIONSHIPS between pieces of code, in any phase of work - coding, debugging, planning, brainstorming, refactoring, review - not only code review:\n- who calls / references symbol X -> query_graph_tool pattern=callers_of / references_to\n- which files import module or file X -> query_graph_tool pattern=importers_of\n- which tests cover X -> query_graph_tool pattern=tests_for\n- what breaks if X changes (blast radius) -> get_impact_radius_tool\n- what a diff or branch touches -> detect_changes_tool, get_review_context_tool\n- how modules depend on each other -> get_architecture_overview_tool, list_communities_tool\n- follow an execution flow -> list_flows_tool, get_flow_tool\nGraph answers include dependents reached through re-exports and barrel files that never spell the name, which text search silently misses.\nFor plain text - string literals, log messages, env var names, comments, config keys - use Grep; the graph does not index text."
+}

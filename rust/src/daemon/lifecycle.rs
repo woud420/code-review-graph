@@ -315,12 +315,18 @@ pub(super) fn worker(home: &Path, repo: &Path, seconds: u64) -> Result<()> {
         .unwrap_or_else(|| repo.join(".code-review-graph"))
         .join("graph.db");
     let mut last_event = Value::Null;
+    let started_at = now();
+    let mut events_seen = 0usize;
+    let mut initial = true;
     loop {
         let result = canonical::index(repo, &db, false, Level::Full, false);
         let ok = match result {
             Ok(report) => {
                 if report.files_parsed + report.files_deleted > 0 {
-                    last_event = json!(now());
+                    if !initial {
+                        last_event = json!(now());
+                        events_seen += report.files_parsed + report.files_deleted;
+                    }
                     println!(
                         "Indexed {} changed and {} deleted files",
                         report.files_parsed, report.files_deleted
@@ -335,10 +341,14 @@ pub(super) fn worker(home: &Path, repo: &Path, seconds: u64) -> Result<()> {
         };
         atomic_write(
             &health,
-            serde_json::to_vec(&json!({"pid":std::process::id(),"repo_root":repo,
+            serde_json::to_vec(
+                &json!({"pid":std::process::id(),"repo":repo,"started_at":started_at,
             "updated_at":now(),"last_event_at":last_event,"observer_alive":true,"degraded":!ok,
-            "phase":"watching","failed_paths":[]}))?,
+            "events_seen":events_seen,"watched_paths":1,"dead_threads":[],
+            "phase":"watching","failed_paths":[]}),
+            )?,
         )?;
+        initial = false;
         if !matches!(
             stop.recv_timeout(Duration::from_secs(seconds.max(1))),
             Err(mpsc::RecvTimeoutError::Timeout)

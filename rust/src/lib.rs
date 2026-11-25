@@ -5,4 +5,4 @@ pub mod mcp;
 pub mod model;
 mod parser;
 pub mod registry;
-mod typescript;
+mod tsconfig;

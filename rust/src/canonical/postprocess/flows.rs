@@ -1,44 +1,8 @@
 use super::{Edge, Node, patterns::*};
+use crate::model::test_file;
 use anyhow::Result;
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
-
-fn test_file(file: &str, repo: Option<&str>) -> bool {
-    let path = Path::new(file);
-    if path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|s| TEST_FILENAME.is_match(s))
-    {
-        return true;
-    }
-    let relative = if path.is_absolute() {
-        repo.and_then(|r| path.strip_prefix(r).ok())
-    } else {
-        Some(path)
-    };
-    let Some(relative) = relative else {
-        return false;
-    };
-    if TEST_DIR.is_match(&relative.to_string_lossy()) {
-        return true;
-    }
-    if let Some(dir) = relative
-        .ancestors()
-        .find(|p| p.file_name().is_some_and(|n| n == "test"))
-    {
-        let parent = dir.parent().unwrap_or(Path::new(""));
-        let shipped = path.extension().is_some_and(|e| e == "py")
-            && !parent.as_os_str().is_empty()
-            && repo.is_some_and(|root| {
-                Path::new(root).join(dir).join("__init__.py").is_file()
-                    && Path::new(root).join(parent).join("__init__.py").is_file()
-            });
-        return !shipped;
-    }
-    false
-}
 
 fn conventional(node: &Node) -> bool {
     let decorated = match node.extra.get("decorators") {

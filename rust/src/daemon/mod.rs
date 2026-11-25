@@ -141,11 +141,25 @@ fn dispatch(args: &[OsString]) -> Result<i32> {
         } => logs(&home, repo.as_deref(), follow, lines)?,
         Action::Add { path, alias } => {
             config::add(&home, &path, alias)?;
+            changed(&home)?;
             true
         }
-        Action::Remove { path_or_alias } => config::remove(&home, &path_or_alias)?,
+        Action::Remove { path_or_alias } => {
+            let removed = config::remove(&home, &path_or_alias)?;
+            if removed {
+                changed(&home)?;
+            }
+            removed
+        }
     };
     Ok(i32::from(!success))
+}
+
+fn changed(home: &Path) -> Result<()> {
+    if lifecycle::running(home)?.is_some() {
+        println!("Daemon will pick up the change automatically.");
+    }
+    Ok(())
 }
 
 fn logs(home: &Path, alias: Option<&str>, follow: bool, lines: isize) -> Result<bool> {

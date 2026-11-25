@@ -172,7 +172,7 @@ print(json.dumps(entries))
 def advertised_options(help_text):
     flags = set()
     for line in help_text.splitlines():
-        if re.match(r"^ {2,4}-", line):
+        if re.match(r"^ {2,8}-", line):
             declaration = re.split(r"\s{2,}", line.strip(), maxsplit=1)[0]
             flags.update(re.findall(r"(?<![\w-])--?[A-Za-z][\w-]*", declaration))
     return sorted(flags)
@@ -358,10 +358,20 @@ def capture(args, temp):
     tested_commands = {"build", "query", "update", "status", "search", "serve"}
     if args.cutover:
         tested_commands.update(argv[0] for argv in REVIEW_COMMANDS.values())
+    daemon_paths = {p.removeprefix("daemon ") for p in tree if p.startswith("daemon ")}
+    covered_daemon = set()
+    if args.cutover:
+        from daemon_parity import compare as compare_daemon
+        coverage = compare_daemon(result, source, args.python, candidate[0], daemon[0] if daemon else None)
+        covered_daemon = coverage["crg-daemon"]
+        primary = coverage["code-review-graph daemon"]
+        tested_commands.update("daemon " + subcommand for subcommand in primary)
+        if primary == daemon_paths:
+            tested_commands.add("daemon")
     untested_cli = sorted(set(tree) - tested_commands - {""})
     result.inventory["behavior_without_fixtures"] = {
         "code-review-graph": untested_cli,
-        "crg-daemon": sorted(p.removeprefix("daemon ") for p in tree if p.startswith("daemon ")),
+        "crg-daemon": sorted(daemon_paths - covered_daemon),
         "tools": untested_tools,
     }
     if args.cutover:

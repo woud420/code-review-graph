@@ -35,12 +35,12 @@ def wait_for(check, label, timeout=20):
     raise AssertionError(f"timed out waiting for {label}")
 
 
-def isolated(root, source):
+def isolated(root, source, python):
     state = root / "state"
     assert state.parent == root and root.is_absolute()
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CRG_", "PYTHON", "GIT_"))}
     env.update(CRG_HOME=str(state), PYTHONPATH=str(source), PYTHONDONTWRITEBYTECODE="1",
-               PYTHONNOUSERSITE="1", PATH=f"{Path(sys.executable).parent}:/usr/bin:/bin",
+               PYTHONNOUSERSITE="1", PATH=f"{Path(python).parent}:/usr/bin:/bin",
                NO_COLOR="1", TERM="dumb", COLUMNS="80",
                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
     return state, env
@@ -110,7 +110,7 @@ def process_state(state):
     return json.loads((state / "daemon-state.json").read_text(encoding="utf-8"))
 
 
-def foreground(command, root, state, env):
+def foreground(command, root, state, env, action):
     """Run the identical lifecycle for each implementation, assert outcomes individually."""
     outcomes = {}
     first, second = root / "first", root / "second"
@@ -120,7 +120,7 @@ def foreground(command, root, state, env):
     conf.write_text(conf.read_text().replace("poll_interval = 2", "poll_interval = 1"))
     log_path = root / "foreground-capture"
     with log_path.open("w") as log, ThreadPoolExecutor(1) as pool:
-        proc = subprocess.Popen(command + ["start", "--foreground"], cwd=root, env=env,
+        proc = subprocess.Popen(command + [action, "--foreground"], cwd=root, env=env,
                                 stdout=log, stderr=log, stdin=subprocess.DEVNULL)
         exit_status = pool.submit(proc.wait)
         try:
@@ -146,6 +146,8 @@ def foreground(command, root, state, env):
             added = run(command + ["add", str(second), "--alias", "added"], root, env)
             assert added["exit"] == 0 and "Daemon will pick up the change automatically." in added["stdout"], added
             wait_for(lambda: "added" in process_state(state) and contains_symbol(second, "original"), "live addition")
+            registry = json.loads((state / "registry.json").read_text())["repos"]
+            assert {(r["path"], r["alias"]) for r in registry} == {(str(first), "fee"), (str(second), "added")}, registry
             outcomes["live-add-and-index"] = True
             removed = run(command + ["remove", "fee"], root, env)
             assert removed["exit"] == 0 and "Daemon will pick up the change automatically." in removed["stdout"], removed
@@ -196,7 +198,105 @@ def native_background(command, root, state, env):
     return 3
 
 
+def fresh_restart(command, root, state, env):
+    # A foreground restart from stopped exercises the public restart handler without
+    # losing the Popen handle or waiting for an unowned daemon PID.
+    capture = root / "restart-capture"
+    with capture.open("w") as stream, ThreadPoolExecutor(1) as pool:
+        proc = subprocess.Popen(command + ["restart", "--foreground"], cwd=root, env=env, stdin=subprocess.DEVNULL,
+                                stdout=stream, stderr=stream)
+        exited = pool.submit(proc.wait)
+        try:
+            wait_for(lambda: int((state / "daemon.pid").read_text()) == proc.pid, "restarted daemon")
+            stop_result = run(command + ["stop"], root, env)
+            assert stop_result == {"exit": 0, "stderr": "", "stdout": f"Stopping daemon (PID {proc.pid})...\nDaemon stopped.\n"}, stop_result
+            assert exited.result(timeout=10) == 0
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    exited.result(timeout=10)
+                except TimeoutError:
+                    proc.kill()
+                    exited.result(timeout=5)
+    content = capture.read_text()
+    assert "Daemon is not running, starting fresh.\n" in content and "Daemon started — watching 0 repo(s)" in content, content
+    return True
+
+
+def compare(results, source, python, public_binary, daemon_binary):
+    python = str(Path(python).absolute())
+    commands = [
+        ("crg-daemon", [python, "-m", "code_review_graph.daemon_cli"], [str(daemon_binary)] if daemon_binary else None),
+        ("code-review-graph daemon", [python, "-m", "code_review_graph", "daemon"], [str(public_binary), "daemon"]),
+    ]
+    covered = {name: set() for name, _, _ in commands}
+    with tempfile.TemporaryDirectory(prefix="crg-daemon-") as temp:
+        root = Path(temp).resolve()
+        state, env = isolated(root, source, python)
+        first, second = repo(root, "first"), repo(root, "second")
+        for program, reference, candidate in commands:
+            prefix = "daemon-process/" + program + "/"
+            observed = []
+            live_results = []
+            for command in (reference, candidate):
+                if not command:
+                    observed.append({})
+                    live_results.append({})
+                    continue
+                process_env = env.copy()
+                if command == candidate:
+                    process_env.pop("PYTHONPATH", None)
+                    process_env["PATH"] = "/usr/bin:/bin"
+                observed.append(stopped(command, root, process_env, state))
+                clean(root, state)
+                live = {}
+                try:
+                    live.update(foreground(command, root, state, process_env, "start"))
+                    clean(root, state)
+                    live["fresh-restart"] = fresh_restart(command, root, state, process_env)
+                except (AssertionError, OSError, ValueError, TimeoutError, subprocess.SubprocessError) as error:
+                    live["failure"] = str(error)
+                live_results.append(live)
+                clean(root, state)
+                for target in (first, second):
+                    graph_dir = target / ".code-review-graph"
+                    if graph_dir.exists():
+                        shutil.rmtree(graph_dir)
+                    (target / "billing.py").write_text("def original():\n    return 1\n")
+            for key, expected in observed[0].items():
+                actual = observed[1].get(key)
+                results.check(prefix + key, expected, actual, cli=isinstance(expected, dict) and actual is not None)
+            for key in ("initial-graph", "initial-worker-and-running-status", "duplicate-start", "edited-source-graph",
+                        "live-add-and-index", "live-remove", "graceful-stop-and-cleanup", "fresh-restart"):
+                results.check(prefix + "live/" + key, live_results[0].get(key), live_results[1].get(key))
+            for engine, evidence in zip(("reference", "candidate"), live_results):
+                results.check(prefix + engine + "-lifecycle-completed", {"complete": True},
+                              {"complete": len(evidence) == 8} | ({"failure": evidence["failure"]} if "failure" in evidence else {}))
+            by_command = {
+                "start": ["live/initial-graph", "live/duplicate-start", "live/edited-source-graph"],
+                "stop": ["stop/empty", "live/graceful-stop-and-cleanup"],
+                "restart": ["live/fresh-restart"], "status": ["status/configured", "live/initial-worker-and-running-status"],
+                "add": ["add/relative", "add/alias-used", "disk/config", "live/live-add-and-index"],
+                "remove": ["remove/missing", "remove/by-path", "disk/removed-config", "live/live-remove"],
+                "logs": ["logs/daemon-tail", "logs/repo-tail", "logs/repo-missing"],
+            }
+            for name, witnesses in by_command.items():
+                if all(results.checks[prefix + key]["match"] and results.checks[prefix + key]["reference"] is not None
+                       for key in witnesses):
+                    covered[program].add(name)
+        if daemon_binary:
+            try:
+                assert native_background([str(daemon_binary)], root, state, env) == 3
+                native = {"complete": True}
+            except (AssertionError, OSError, ValueError, TimeoutError, subprocess.SubprocessError) as error:
+                native = {"complete": False, "error": str(error)}
+            results.check("daemon-process/native/background-and-unrelated-process", {"complete": True}, native)
+    return covered
+
+
 def main():
+    from public_parity import Results
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--upstream", type=Path, required=True)
     parser.add_argument("--daemon-binary", type=Path, required=True)
@@ -204,34 +304,16 @@ def main():
     args = parser.parse_args()
     source = args.upstream.resolve()
     pinned_reference(source)
-    commands = [
-        ([sys.executable, "-m", "code_review_graph.daemon_cli"], [str(args.daemon_binary.resolve())]),
-        ([sys.executable, "-m", "code_review_graph", "daemon"], [str(args.public_binary.resolve()), "daemon"]),
-    ]
-    with tempfile.TemporaryDirectory(prefix="crg-daemon-") as temp:
-        root = Path(temp).resolve()
-        state, env = isolated(root, source)
-        first, second = repo(root, "first"), repo(root, "second")
-        for reference, candidate in commands:
-            results = []
-            for command in (reference, candidate):
-                results.append(stopped(command, root, env, state))
-                clean(root, state)
-            failures = [k for k in results[0] if results[0][k] != results[1][k]]
-            for key in failures:
-                print(f"{key}: Python={results[0][key]!r} Rust={results[1][key]!r}", file=sys.stderr)
-            assert not failures, f"{len(failures)} mismatches for {candidate}"
-            print(f"{candidate[-1]}: {len(results[0])} exact CLI responses/config comparisons")
-        for command in commands[0]:
-            checks = foreground(command, root, state, env)
-            assert len(checks) == 7
-            print(f"{command[-1]}: {len(checks)} live lifecycle assertions")
-            clean(root, state)
-            for target in (first, second):
-                shutil.rmtree(target / ".code-review-graph")
-                (target / "billing.py").write_text("def original():\n    return 1\n")
-        print(f"Native: {native_background(commands[0][1], root, state, env)} additional background/PID checks")
+    result = Results()
+    covered = compare(result, source, sys.executable, args.public_binary.resolve(), args.daemon_binary.resolve())
+    failures = [name for name, item in result.checks.items() if not item["match"]]
+    for name in failures:
+        print(f"{name}: {result.checks[name]}", file=sys.stderr)
+    print(f"{len(result.checks) - len(failures)}/{len(result.checks)} daemon observations and lifecycle checks")
+    for name, commands in covered.items():
+        print(f"{name}: {', '.join(sorted(commands))}")
+    return int(bool(failures))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

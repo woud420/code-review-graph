@@ -193,6 +193,7 @@ pub(super) fn run(
                 relative(from),
                 relative(to)
             );
+            out["summary"] = json!(msg);
             if matches!(route(conn, to, from)?, Route::Found(_)) {
                 out["reverse_route_exists"] = json!(true);
                 msg.push_str(" There is a route the other way: swap target and to.");

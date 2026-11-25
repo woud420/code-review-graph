@@ -1,6 +1,7 @@
-use super::{direct_target, field, record};
+use super::syntax::{direct_target, field, record};
 use crate::model::{
-    Call, Export, Import, ParsedFile, PythonDefinition, PythonMember, PythonType, ScopedImport,
+    Call, Export, Import, ParsedFile, PythonDefinition, PythonMember, PythonReceiver, PythonType,
+    ScopedImport,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -34,10 +35,17 @@ struct Frame {
     start: usize,
     end: usize,
     bindings: HashMap<String, Option<PythonType>>,
+    receivers: HashMap<String, Option<PythonType>>,
+    declared: HashMap<String, String>,
+    class_scope: bool,
 }
 
 impl Frame {
     fn bind(&mut self, name: &str, evidence: Option<PythonType>) {
+        self.receivers.insert(
+            name.strip_prefix("self.").unwrap_or(name).to_owned(),
+            evidence.clone(),
+        );
         self.bindings.insert(name.to_owned(), evidence);
     }
 }
@@ -112,6 +120,7 @@ impl Reader<'_> {
         self.facts.python.definitions.insert(
             qualified.clone(),
             PythonDefinition {
+                module_level: self.frames.len() == 1,
                 parent,
                 params,
                 returns,
@@ -160,6 +169,9 @@ impl Reader<'_> {
     fn evidence(&self, node: Node<'_>, class: &str) -> Option<PythonType> {
         let expr = text(node, self.source).trim();
         if let Some(name) = expr.strip_prefix("self.") {
+            if let Some(ty) = self.frames.last().and_then(|f| f.bindings.get(expr)) {
+                return ty.clone();
+            }
             return self
                 .fields
                 .get(&(class.to_owned(), name.to_owned()))
@@ -185,7 +197,23 @@ impl Reader<'_> {
                     element: None,
                 })
             }
-            "parenthesized_expression" => self.evidence(node.named_child(0)?, class),
+            "concatenated_string"
+            | "dictionary"
+            | "dictionary_comprehension"
+            | "false"
+            | "float"
+            | "generator_expression"
+            | "integer"
+            | "list"
+            | "list_comprehension"
+            | "set"
+            | "set_comprehension"
+            | "string"
+            | "true"
+            | "tuple" => Some(PythonType::Builtin),
+            "parenthesized_expression" => self
+                .evidence(node.named_child(0)?, class)
+                .filter(|ty| !matches!(ty, PythonType::Builtin)),
             _ => None,
         }
     }
@@ -213,7 +241,13 @@ impl Reader<'_> {
             return;
         }
         let ty = annotation
-            .map(|s| PythonType::Named(s.to_owned()))
+            .map(|s| {
+                if node.kind().contains("parameter") {
+                    PythonType::Parameter(s.to_owned())
+                } else {
+                    PythonType::Named(s.to_owned())
+                }
+            })
             .or_else(|| {
                 let value = value?;
                 if value.kind() == "identifier" {
@@ -238,9 +272,38 @@ impl Reader<'_> {
             }
         } else {
             let name = text(lhs, self.source);
+            if let Some(ty_name) = annotation
+                && !name.contains('.')
+            {
+                self.frames
+                    .last_mut()
+                    .unwrap()
+                    .declared
+                    .insert(name.to_owned(), ty_name.to_owned());
+            }
+            let class_field = if self.frames.last().unwrap().class_scope {
+                Some(name)
+            } else {
+                name.strip_prefix("self.")
+            };
+            if let Some(field) = class_field
+                && !field.contains('.')
+                && let Some(ty) = &ty
+            {
+                let types = self
+                    .facts
+                    .python
+                    .fields
+                    .entry(format!("{class}.{field}"))
+                    .or_default();
+                if !types.contains(ty) {
+                    types.push(ty.clone());
+                }
+            }
             if let Some(field) = name.strip_prefix("self.")
                 && !field.contains('.')
             {
+                self.frames.last_mut().unwrap().bind(name, ty.clone());
                 let entry = self
                     .fields
                     .entry((class.to_owned(), field.to_owned()))
@@ -257,6 +320,7 @@ impl Reader<'_> {
                             .split('|')
                             .map(str::trim)
                             .filter(|s| *s != "None")
+                            .map(|s| s.split('[').next().unwrap_or(s))
                             .eq(std::iter::once(callee.as_str())),
                         _ => false,
                     };
@@ -268,7 +332,7 @@ impl Reader<'_> {
                 let prior = self.evidence(lhs, class);
                 let same_type = match (&prior, &ty) {
                     (
-                        Some(PythonType::Named(owner)),
+                        Some(PythonType::Named(owner) | PythonType::Parameter(owner)),
                         Some(PythonType::Returned {
                             callee,
                             element: None,
@@ -325,6 +389,7 @@ impl Reader<'_> {
                     self.export(name, &id);
                 }
                 let frame = Frame {
+                    class_scope: is_class,
                     start: node.start_position().row + 1,
                     end: node.end_position().row + 1,
                     ..Default::default()
@@ -390,6 +455,34 @@ impl Reader<'_> {
                             .map(|method| format!("<expression>.{method}"))
                     })
                 {
+                    if let Some(object) = fun.child_by_field_name("object") {
+                        let name = match object.kind() {
+                            "identifier" => Some(text(object, self.source).to_owned()),
+                            "attribute" if field(object, "object", self.source) == Some("self") => {
+                                field(object, "attribute", self.source).map(str::to_owned)
+                            }
+                            _ => None,
+                        };
+                        let declared = name
+                            .as_deref()
+                            .and_then(|n| self.frames.iter().rev().find_map(|f| f.declared.get(n)))
+                            .cloned();
+                        let receiver_type = if object.kind() == "attribute" {
+                            name.as_deref()
+                                .and_then(|name| self.frames.last()?.receivers.get(name).cloned())
+                                .unwrap_or_else(|| self.evidence(object, class))
+                        } else {
+                            self.evidence(object, class)
+                        };
+                        self.facts.python.receivers.push(PythonReceiver {
+                            declared,
+                            caller: caller.to_owned(),
+                            line: node.start_position().row + 1,
+                            raw: callee.clone(),
+                            name,
+                            binding: receiver_type,
+                        });
+                    }
                     self.facts.calls.push(Call {
                         caller: caller.to_owned(),
                         callee,

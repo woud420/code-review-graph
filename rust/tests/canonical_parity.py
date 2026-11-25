@@ -25,6 +25,7 @@ QUERIES = {
     "symbols": "SELECT kind, qualified_name, line_start, line_end FROM nodes",
     "declarations": """SELECT kind, name, qualified_name, parent_name, params, return_type,
         modifiers, is_test, symbol, docstring, name_tokens, signature FROM nodes""",
+    "node_attributes": "SELECT qualified_name,extra FROM nodes",
     "edges": "SELECT kind, source_qualified, target_qualified, file_path, line FROM edges",
     "resolved_calls": """SELECT DISTINCT e.source_qualified,e.target_qualified FROM edges e
         JOIN nodes s ON s.qualified_name=e.source_qualified
@@ -47,7 +48,7 @@ def read_graph(path, root):
             rows = Counter()
             for record in db.execute(sql):
                 values = list(record)
-                if group == "edge_attributes":
+                if group in ("edge_attributes", "node_attributes"):
                     values[-1] = json.loads(values[-1] or "{}")
                 key = json.dumps(values, sort_keys=True, ensure_ascii=False).replace(str(root) + "/", "")
                 rows[key] += 1

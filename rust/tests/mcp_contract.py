@@ -136,6 +136,8 @@ def inspect(command, repo, env, prompt_specs=None, extended=False):
             "clientInfo": {"name": "parity-oracle", "version": "1"},
         })
         client.send({"method": "notifications/initialized"})
+        for method, arguments in [("resources/list", {}), ("resources/templates/list", {}), ("resources/read", {"uri":"file:///missing"}), ("logging/setLevel", {"level":"info"})]:
+            probes[method]=client.call(method,arguments)
         for category in ("tools", "prompts"):
             pages, inventory[category] = catalog(client, category)
             probes[category + "/list"] = pages

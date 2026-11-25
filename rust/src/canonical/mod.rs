@@ -1,4 +1,8 @@
+#[cfg(test)]
+mod cache_upgrade;
 mod docs;
+mod evidence;
+mod imports;
 pub mod postprocess;
 mod source;
 
@@ -13,9 +17,15 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use sha2::{Digest, Sha256};
 
 use crate::{graph::Graph, model::ParsedFile};
-use source::{Declaration, Source, import_target};
+use imports::import_target;
+use source::{Declaration, Source};
 
 pub struct IndexReport {
+    pub base: Option<String>,
+    pub interrupted: bool,
+    pub changed_files: Vec<String>,
+    pub dependent_files: Vec<String>,
+    pub effective_level: postprocess::Level,
     pub full: bool,
     pub files_parsed: usize,
     pub files_deleted: usize,
@@ -24,6 +34,8 @@ pub struct IndexReport {
     pub files: i64,
     pub postprocess: postprocess::Report,
 }
+
+const INDEX_VERSION: &str = "2";
 
 struct WriteLock(File);
 
@@ -121,10 +133,11 @@ pub fn index(
         [],
         |r| r.get::<_, bool>(0),
     )?;
+    let mut upgrade = false;
     if empty {
         tx.execute_batch(include_str!("schema.sql"))?;
         set_metadata(&tx, "schema_version", "15")?;
-        set_metadata(&tx, "rust_index_version", "1")?;
+        set_metadata(&tx, "rust_index_version", INDEX_VERSION)?;
     } else {
         ensure!(
             metadata(&tx, "schema_version")?.as_deref() == Some("15"),
@@ -134,7 +147,7 @@ pub fn index(
             let other_language: Option<String> = tx
                 .query_row(
                     "SELECT language FROM nodes WHERE kind='File' AND coalesce(language,'') NOT IN
-                ('python','rust','javascript','typescript','tsx') LIMIT 1",
+                ('python','rust','javascript','typescript','tsx','bash','json') LIMIT 1",
                     [],
                     |r| r.get(0),
                 )
@@ -152,10 +165,11 @@ pub fn index(
                 "this graph contains embeddings that require an embedding-aware writer"
             );
         } else {
-            ensure!(
-                metadata(&tx, "rust_index_version")?.as_deref() == Some("1"),
-                "unsupported native index version"
-            );
+            match metadata(&tx, "rust_index_version")?.as_deref() {
+                Some("1") => upgrade = true,
+                Some(INDEX_VERSION) => {}
+                _ => anyhow::bail!("unsupported native index version"),
+            }
         }
         let owner = metadata(&tx, "repo_root")?;
         ensure!(
@@ -164,7 +178,18 @@ pub fn index(
         );
     }
 
+    let previous_state = metadata(&tx, "build_state")?;
+    let interrupted = matches!(
+        previous_state.as_deref(),
+        Some("in-progress" | "postprocess-pending")
+    );
+    let base = if root.join(".git").exists() {
+        metadata(&tx, "git_head_sha")?
+    } else {
+        Some("HEAD~1".to_owned())
+    };
     let full = full
+        || upgrade
         || empty
         || (root.join(".git").exists()
             && !metadata(&tx, "git_head_sha")?.is_some_and(|sha| {
@@ -187,7 +212,9 @@ pub fn index(
         .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
         .collect::<rusqlite::Result<_>>()?;
     let paths: BTreeSet<_> = files.keys().cloned().collect();
+    let ts_paths = crate::tsconfig::TsPaths::load(&root, paths.iter());
     let writer = Writer {
+        ts_paths,
         staging,
         root: &root,
         paths: &paths,
@@ -200,14 +227,38 @@ pub fn index(
             .update(hash.as_bytes());
     }
     let manifest = manifest.finalize().to_hex().to_string();
+    let mut changed_files = Vec::new();
+    let mut dependent_files = Vec::new();
     let mut parsed = 0;
     let mut deleted = 0;
     let mut changed = false;
     if full || metadata(&tx, "rust_source_manifest")?.as_deref() != Some(&manifest) {
         (parsed, deleted) = writer.apply(&tx, &files, full)?;
+        if !full {
+            for (output, sql) in [
+                (
+                    &mut changed_files,
+                    "SELECT file FROM original_changes ORDER BY file",
+                ),
+                (
+                    &mut dependent_files,
+                    "SELECT file FROM affected EXCEPT SELECT file FROM original_changes ORDER BY file",
+                ),
+            ] {
+                let mut stmt = tx.prepare(sql)?;
+                for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+                    output.push(
+                        Path::new(&row?)
+                            .strip_prefix(&root)?
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
         changed = full || parsed != 0 || deleted != 0;
         set_metadata(&tx, "rust_source_manifest", &manifest)?;
-        set_metadata(&tx, "rust_index_version", "1")?;
+        set_metadata(&tx, "rust_index_version", INDEX_VERSION)?;
     }
     if changed {
         tx.execute("INSERT OR REPLACE INTO metadata VALUES('last_updated',strftime('%Y-%m-%dT%H:%M:%S','now','localtime'))",[])?;
@@ -228,17 +279,22 @@ pub fn index(
             set_metadata(&tx, "git_branch", &branch)?;
         }
     }
-    let postprocess = if changed
-        || (level != postprocess::Level::None
-            && (metadata(&tx, "build_state")?.as_deref() != Some("complete")
-                || (level == postprocess::Level::Full
-                    && metadata(&tx, "postprocess_level")?.as_deref() != Some("full"))))
-    {
-        postprocess::process(&tx, level, full)?
+    let effective_level = if !changed && !interrupted && level == postprocess::Level::Full {
+        postprocess::Level::Minimal
+    } else {
+        level
+    };
+    let postprocess = if changed || effective_level != postprocess::Level::None {
+        postprocess::process(&tx, effective_level, full)?
     } else {
         postprocess::Report::default()
     };
     let report = IndexReport {
+        base: if full { None } else { base },
+        interrupted,
+        changed_files,
+        dependent_files,
+        effective_level,
         postprocess,
         full,
         files_parsed: parsed,
@@ -252,6 +308,7 @@ pub fn index(
 }
 
 struct NodeRow<'a> {
+    test_file: bool,
     name: &'a str,
     qualified: &'a str,
     kind: &'a str,
@@ -259,6 +316,7 @@ struct NodeRow<'a> {
     start: usize,
     end: usize,
     declaration: Option<&'a Declaration>,
+    extra: Option<&'a serde_json::Value>,
 }
 
 fn write_node(
@@ -271,7 +329,11 @@ fn write_node(
     let fallback = Declaration::default();
     let declaration = node.declaration.unwrap_or(&fallback);
     let doc = declaration.doc.as_deref();
-    let mut extra = serde_json::Map::new();
+    let mut extra = node
+        .extra
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
     if !declaration.decorators.is_empty() {
         extra.insert(
             "decorators".into(),
@@ -291,7 +353,7 @@ fn write_node(
         symbol=excluded.symbol,docstring=excluded.docstring,name_tokens=excluded.name_tokens,updated_at=excluded.updated_at
         WHERE nodes.file_hash!=excluded.file_hash")?
         .execute(params![node.kind,node.name,node.qualified,path,node.start as i64,node.end as i64,language,node.parent,
-            declaration.params,declaration.returns,declaration.modifiers,node.kind=="Test",hash,extra,
+            declaration.params,declaration.returns,declaration.modifiers,node.test_file || node.kind=="Test",hash,extra,
             node.qualified.split_once("::").map_or(node.qualified,|(_,s)|s.split_once(":S").map_or(s, |(base,_)| base)),doc,index_tokens(node.name,node.kind,path,node.parent)])?;
     Ok(())
 }
@@ -351,7 +413,20 @@ fn edge(
     Ok(())
 }
 
+fn import_edge(
+    tx: &Transaction<'_>,
+    path: &str,
+    target: &str,
+    line: usize,
+    extra: &serde_json::Value,
+) -> Result<()> {
+    tx.prepare_cached("INSERT OR IGNORE INTO imported(kind,source,target,path,line,extra) VALUES('IMPORTS_FROM',?1,?2,?1,?3,?4)")?
+        .execute(params![path,target,line as i64,extra.to_string()])?;
+    Ok(())
+}
+
 struct Writer<'a> {
+    ts_paths: crate::tsconfig::TsPaths,
     staging: &'a Connection,
     root: &'a Path,
     paths: &'a BTreeSet<String>,
@@ -390,10 +465,15 @@ impl Writer<'_> {
             tx.execute("DELETE FROM nodes WHERE file_path=?", [path])?;
         }
         if !full {
-            tx.execute_batch("WITH RECURSIVE deps(file) AS (
+            tx.execute_batch("CREATE TEMP TABLE original_changes AS SELECT file FROM affected; WITH RECURSIVE deps(file) AS (
                 SELECT file FROM affected UNION SELECT e.file_path FROM edges e JOIN deps d ON e.target_qualified=d.file
                    WHERE e.kind='IMPORTS_FROM'
             ) INSERT OR IGNORE INTO affected SELECT file FROM deps")?;
+        }
+        if !full {
+            tx.execute_batch("INSERT OR IGNORE INTO affected
+                SELECT file_path FROM nodes WHERE kind='File' AND language IN ('typescript','tsx','javascript')
+                AND EXISTS(SELECT 1 FROM original_changes WHERE file LIKE '%/tsconfig.json' OR file LIKE '%/jsconfig.json')")?;
         }
         let affected: Vec<String> = tx
             .prepare("SELECT file FROM affected ORDER BY file")?
@@ -402,6 +482,7 @@ impl Writer<'_> {
         if affected.is_empty() {
             return Ok((0, deleted));
         }
+        let returns = evidence::ReturnIndex::read(self.staging)?;
         for absolute in &affected {
             let relative = Path::new(absolute)
                 .strip_prefix(self.root)?
@@ -415,19 +496,17 @@ impl Writer<'_> {
                 blake3::hash(&data).to_hex().as_str() == hash,
                 "source changed while indexing: {relative}"
             );
-            let source = Source::parse(Path::new(relative), std::str::from_utf8(&data)?)?;
-            self.materialize_file(
-                tx,
-                relative,
-                &serde_json::from_str(facts)?,
-                &source,
-                &digests[relative],
-            )?;
+            let facts: ParsedFile = serde_json::from_str(facts)?;
+            let mut source = Source::parse(Path::new(relative), std::str::from_utf8(&data)?)?;
+            if facts.cfamily.language == "cpp" {
+                source.language = "cpp";
+            }
+            self.materialize_file(tx, relative, &facts, &source, &digests[relative], &returns)?;
         }
         tx.execute_batch("DELETE FROM edges WHERE file_path IN (SELECT file FROM affected);
             INSERT OR IGNORE INTO imported(kind,source,target,path,line,extra)
                 SELECT 'TESTED_BY',e.target,e.source,e.path,e.line,e.extra FROM imported e
-                JOIN nodes n ON n.qualified_name=e.source WHERE e.kind='CALLS' AND n.is_test=1;
+                JOIN nodes n ON n.qualified_name=e.source WHERE e.kind='CALLS' AND n.kind='Test';
             INSERT INTO edges(kind,source_qualified,target_qualified,file_path,line,target_resolution,extra,updated_at)
                 SELECT kind,source,target,path,line,resolution,extra,unixepoch('subsec') FROM imported ORDER BY rowid")?;
         Ok((if full { files.len() } else { affected.len() }, deleted))
@@ -440,12 +519,15 @@ impl Writer<'_> {
         facts: &ParsedFile,
         source: &Source,
         sha: &str,
+        returns: &evidence::ReturnIndex,
     ) -> Result<()> {
         let Self {
             staging,
             root,
             paths,
+            ts_paths,
         } = self;
+        let test_file = crate::model::test_file(relative, root.to_str());
         let full_path = root.join(relative);
         let path = full_path.to_str().context("non UTF-8 path")?;
         write_node(
@@ -454,6 +536,7 @@ impl Writer<'_> {
             source.language,
             sha,
             NodeRow {
+                test_file,
                 name: path,
                 qualified: path,
                 kind: "File",
@@ -461,6 +544,7 @@ impl Writer<'_> {
                 start: 1,
                 end: source.lines,
                 declaration: None,
+                extra: Some(&facts.json.file),
             },
         )?;
         for symbol in &facts.symbols {
@@ -472,10 +556,34 @@ impl Writer<'_> {
             let (parent, name) = identity
                 .rsplit_once('.')
                 .map_or((None, identity), |(p, n)| (Some(p), n));
+            let json = facts.json.paths.get(&symbol.name);
+            let (parent, name) = if json.is_some() {
+                (None, symbol.name.strip_prefix("json:").unwrap_or(name))
+            } else {
+                (parent, name)
+            };
+            let cc = facts
+                .cfamily
+                .declarations
+                .iter()
+                .find(|d| d.identity == symbol.name && d.start == symbol.start_line);
+            let (parent, name) =
+                cc.map_or((parent, name), |d| (d.parent.as_deref(), d.name.as_str()));
+            let c_decl = cc.map(|d| Declaration {
+                params: d.params.clone(),
+                doc: d.doc.clone(),
+                ..Default::default()
+            });
             let details = source
                 .declarations
                 .get(&(symbol.start_line, name.to_owned()));
             let python = facts.python.definitions.get(&symbol.name);
+            let go = facts.go.declarations.get(&symbol.name);
+            let go_declaration = go.map(|d| Declaration {
+                params: d.params.clone(),
+                doc: d.doc.clone(),
+                ..Default::default()
+            });
             let enriched = python.map(|d| Declaration {
                 params: d.params.clone(),
                 returns: d.returns.clone(),
@@ -489,19 +597,40 @@ impl Writer<'_> {
                 source.language,
                 sha,
                 NodeRow {
+                    test_file,
                     name,
                     qualified: &qn,
                     kind: &symbol.kind,
                     parent,
                     start: symbol.start_line,
                     end: symbol.end_line,
-                    declaration: enriched.as_ref().or(details),
+                    declaration: c_decl
+                        .as_ref()
+                        .or(go_declaration.as_ref())
+                        .or(enriched.as_ref())
+                        .or(details),
+                    extra: go
+                        .map(|d| &d.extra)
+                        .or_else(|| json.map(|p| &p.extra))
+                        .or_else(|| facts.typescript.kinds.get(&symbol.name)),
                 },
             )?;
-            let container = parent
-                .filter(|_| !(source.language == "python" && symbol.kind == "Class"))
-                .map(|p| qualified(path, p))
-                .unwrap_or_else(|| path.to_owned());
+            let container = if let Some(c) = cc {
+                c.container.as_deref()
+            } else {
+                json.and_then(|p| p.parent.as_deref())
+                    .or_else(|| {
+                        facts
+                            .typescript
+                            .containers
+                            .get(&symbol.name)
+                            .map(String::as_str)
+                    })
+                    .or(parent)
+            }
+            .filter(|_| !(source.language == "python" && symbol.kind == "Class"))
+            .map(|p| qualified(path, p))
+            .unwrap_or_else(|| path.to_owned());
             edge(
                 tx,
                 "CONTAINS",
@@ -511,6 +640,21 @@ impl Writer<'_> {
                 symbol.start_line,
                 None,
             )?;
+            if let Some(d) = cc {
+                for base in &d.bases {
+                    edge(tx, "INHERITS", &qn, base, path, symbol.start_line, None)?;
+                }
+            }
+            if let Some(bases) = facts.typescript.bases.get(&symbol.name) {
+                for base in bases {
+                    edge(tx, "INHERITS", &qn, base, path, symbol.start_line, None)?;
+                }
+            }
+            if let Some(d) = go {
+                for base in &d.bases {
+                    edge(tx, "INHERITS", &qn, base, path, symbol.start_line, None)?;
+                }
+            }
             if let Some(def) = python
                 && symbol.kind == "Class"
             {
@@ -519,15 +663,78 @@ impl Writer<'_> {
                 }
             }
         }
+        for (line, module) in &facts.bash_imports {
+            let full = root.join(relative);
+            let path_from_caller = full.parent().unwrap_or(root).join(module);
+            let target = path_from_caller.canonicalize().ok().filter(|p| p.is_file());
+            import_edge(
+                tx,
+                path,
+                target.as_deref().and_then(Path::to_str).unwrap_or(module),
+                *line,
+                &serde_json::json!({}),
+            )?;
+        }
+        for (line, module) in &facts.cfamily.imports {
+            edge(tx, "IMPORTS_FROM", path, module, path, *line, None)?;
+        }
+        for (line, module) in &facts.go.imports {
+            let target = crate::parser::go::package_dir(root, relative, module, paths);
+            let extra = if target.is_some() {
+                serde_json::json!({"import_scope":"package"})
+            } else {
+                serde_json::json!({})
+            };
+            import_edge(tx, path, target.as_deref().unwrap_or(module), *line, &extra)?;
+        }
+        for (caller, name, line) in &facts.typescript.references {
+            let target = if facts
+                .symbols
+                .iter()
+                .any(|s| s.name == *name && !s.name.contains('.'))
+            {
+                qualified(path, name)
+            } else if let Some(binding) = facts.imports.iter().find(|b| b.local == *name) {
+                import_target(relative, &binding.module, source.language, paths)
+                    .or_else(|| ts_paths.resolve(relative, &binding.module, |p| paths.contains(p)))
+                    .map(|f| qualified(&root.join(f).to_string_lossy(), &binding.imported))
+                    .unwrap_or_else(|| name.clone())
+            } else {
+                continue;
+            };
+            edge(
+                tx,
+                "REFERENCES",
+                &qualified(path, caller),
+                &target,
+                path,
+                *line,
+                None,
+            )?;
+        }
         for (line, module) in &source.imports {
             let target = import_target(relative, module, source.language, paths)
+                .or_else(|| ts_paths.resolve(relative, module, |p| paths.contains(p)))
                 .map(|p| root.join(p).to_string_lossy().into_owned())
                 .unwrap_or_else(|| module.clone());
-            edge(tx, "IMPORTS_FROM", path, &target, path, *line, None)?;
+            let (target, extra) = source
+                .import_details
+                .resolve(root, relative, module, target, *line, paths);
+            import_edge(tx, path, &target, *line, &extra)?;
         }
         for (kind, from, to, line) in source.extra_edges.rows(root, relative, facts, paths) {
-            edge(tx, kind, &from, &to, path, line, None)?;
+            if kind == "IMPORTS_FROM" {
+                let (target, extra) = source
+                    .import_details
+                    .resolve(root, relative, "", to, line, paths);
+                import_edge(tx, &from, &target, line, &extra)?;
+            } else {
+                edge(tx, kind, &from, &to, path, line, None)?;
+            }
         }
+        let evidence = evidence::CallEvidence::new(root, relative, facts, source, paths, returns);
+        let mut write_call=tx.prepare_cached("INSERT INTO imported(kind,source,target,path,line,resolution,extra) VALUES('CALLS',?,?,?,?,?,?)
+            ON CONFLICT(kind,source,target,path,line) DO UPDATE SET extra=excluded.extra")?;
         let mut resolved = BTreeSet::new();
         let mut stmt = staging.prepare_cached(
             "SELECT source,raw_target,line,target_file,target FROM call_sites WHERE source_file=?",
@@ -539,16 +746,20 @@ impl Writer<'_> {
             let line = usize::try_from(row.get::<_, i64>(2)?)?;
             let file: String = row.get(3)?;
             let symbol: String = row.get(4)?;
-            let target = qualified(&root.join(file).to_string_lossy(), &symbol);
-            edge(
-                tx,
-                "CALLS",
-                &qualified(path, &caller),
-                &target,
+            let target = qualified(&root.join(&file).to_string_lossy(), &symbol);
+            let extra = evidence.describe(&caller, &raw, line, Some((&file, &symbol)));
+            write_call.execute(params![
+                qualified(path, &caller),
+                target,
                 path,
-                line,
-                Some("direct"),
-            )?;
+                line as i64,
+                "direct",
+                if extra.is_null() {
+                    "{}".into()
+                } else {
+                    extra.to_string()
+                }
+            ])?;
             resolved.insert((caller, raw, line));
         }
         for call in &facts.calls {
@@ -558,28 +769,22 @@ impl Writer<'_> {
                     .as_ref()
                     .map(|(name, _)| name.as_str())
                     .unwrap_or_else(|| call.callee.rsplit('.').next().unwrap_or(&call.callee));
-                edge(
-                    tx,
-                    "CALLS",
-                    &qualified(path, &call.caller),
+                let mut extra = evidence.describe(&call.caller, &call.callee, call.line, None);
+                if let Some((_, target)) = &claim {
+                    extra["claimed_endpoint"] = serde_json::json!(target);
+                }
+                write_call.execute(params![
+                    qualified(path, &call.caller),
                     bare,
                     path,
-                    call.line,
-                    Some("unresolved"),
-                )?;
-                let extra = if let Some((_, target)) = claim.as_ref() {
-                    Some(serde_json::json!({"claimed_endpoint":target}))
-                } else {
-                    call.callee.rsplit_once('.').map(|(receiver,_)| if receiver == "<expression>" {
-                        serde_json::json!({"receiver_form":"expression","receiver_binding":"unknown"})
+                    call.line as i64,
+                    "unresolved",
+                    if extra.is_null() {
+                        "{}".into()
                     } else {
-                        serde_json::json!({"receiver":receiver,"receiver_binding":"unknown"})
-                    })
-                };
-                if let Some(extra) = extra {
-                    tx.execute("UPDATE imported SET extra=? WHERE kind='CALLS' AND source=? AND target=? AND path=? AND line=?",
-                        params![extra.to_string(),qualified(path,&call.caller),bare,path,call.line as i64])?;
-                }
+                        extra.to_string()
+                    }
+                ])?;
             }
         }
         Ok(())

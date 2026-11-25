@@ -360,7 +360,7 @@ impl<'a> Boost<'a> {
     }
 }
 
-fn ranked(
+pub(super) fn ranked(
     conn: &Connection,
     root: &Path,
     options: &Options,
@@ -370,7 +370,7 @@ fn ranked(
     if query.trim().is_empty() {
         return Ok(("none", vec![]));
     }
-    let fetch = window * 3;
+    let fetch = window.saturating_mul(3);
     let kind = options.kind.as_deref().filter(|s| !s.is_empty());
     let boost = Boost::new(query, kind);
     let mut hits = fts(conn, query, kind, fetch, false)?;

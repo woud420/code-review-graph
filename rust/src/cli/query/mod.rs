@@ -1,7 +1,11 @@
+mod confidence;
+mod doc_metadata;
+pub(super) use confidence::empty as empty_confidence;
 mod relationships;
 mod route;
+mod tests_for;
 use super::{store, terms};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use rusqlite::{Connection, Row};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,27 +27,6 @@ pub struct Query {
     pub to: Option<String>,
 }
 
-pub const SUPPORTED: &[&str] = &[
-    "callers_of",
-    "callees_of",
-    "references_to",
-    "file_summary",
-    "children_of",
-    "imports_of",
-    "importers_of",
-    "inheritors_of",
-    "consumers_of",
-    "path_to",
-    "triggers_of",
-    "triggered_by",
-    "publishers_of",
-    "listeners_of",
-    "advises",
-    "advised_by",
-    "handlers_of",
-    "endpoints_for",
-];
-
 pub fn clean(s: &str) -> String {
     s.chars()
         .filter(|c| *c >= ' ' || matches!(c, '\t' | '\n'))
@@ -56,12 +39,12 @@ pub fn text<'a>(value: &'a Value, key: &str) -> &'a str {
 
 pub fn node(row: &Row<'_>) -> rusqlite::Result<Value> {
     let parent: Option<String> = row.get("parent_name")?;
-    Ok(
-        json!({"id":row.get::<_,i64>("id")?, "kind":row.get::<_,String>("kind")?, "name":clean(&row.get::<_,String>("name")?),
+    let mut data = json!({"id":row.get::<_,i64>("id")?, "kind":row.get::<_,String>("kind")?, "name":clean(&row.get::<_,String>("name")?),
         "qualified_name":clean(&row.get::<_,String>("qualified_name")?), "file_path":row.get::<_,String>("file_path")?,
         "line_start":row.get::<_,Option<i64>>("line_start")?, "line_end":row.get::<_,Option<i64>>("line_end")?,
-        "language":row.get::<_,Option<String>>("language")?.unwrap_or_default(), "parent_name":parent.as_deref().map(clean), "is_test":row.get::<_,bool>("is_test")?}),
-    )
+        "language":row.get::<_,Option<String>>("language")?.unwrap_or_default(), "parent_name":parent.as_deref().map(clean), "is_test":row.get::<_,bool>("is_test")?});
+    doc_metadata::add(&mut data, row.get("extra")?);
+    Ok(data)
 }
 
 fn nodes(conn: &Connection, condition: &str, arg: &str) -> Result<Vec<Value>> {
@@ -71,14 +54,58 @@ fn nodes(conn: &Connection, condition: &str, arg: &str) -> Result<Vec<Value>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-struct Edge {
+pub(super) struct Edge {
     source: String,
     target: String,
     file: String,
     line: i64,
     extra: Value,
-    wire: Value,
+    pub(super) wire: Value,
 }
+pub(super) fn edge(r: &Row<'_>) -> rusqlite::Result<Edge> {
+    let kind: String = r.get("kind")?;
+    let source: String = r.get("source_qualified")?;
+    let target: String = r.get("target_qualified")?;
+    let file: String = r.get("file_path")?;
+    let line = r.get::<_, Option<i64>>("line")?.unwrap_or_default();
+    let mut wire = json!({"id":r.get::<_,i64>("id")?,"kind":kind,"source":clean(&source),"target":clean(&target),"file_path":file,"line":line,
+            "confidence":r.get::<_,Option<f64>>("confidence")?,"confidence_tier":r.get::<_,Option<String>>("confidence_tier")?});
+    if r.get::<_, Option<String>>("target_resolution")?.as_deref() == Some("unresolved") {
+        wire["target_resolution"] = json!("unresolved");
+    }
+    let extra: Value = r
+        .get::<_, Option<String>>("extra")?
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(Value::Null);
+    for prefix in ["ambiguous", "unresolved"] {
+        let key = format!("{prefix}_targets");
+        if let Some(list) = extra[&key].as_array() {
+            let names: Vec<_> = list
+                .iter()
+                .take(20)
+                .filter_map(Value::as_str)
+                .map(clean)
+                .collect();
+            let count = extra[format!("{prefix}_target_count")]
+                .as_u64()
+                .unwrap_or(list.len() as u64);
+            let truncated =
+                count > names.len() as u64 || extra[format!("{prefix}_targets_truncated")] == true;
+            wire[&key] = json!(names);
+            wire[format!("{prefix}_target_count")] = json!(count);
+            wire[format!("{prefix}_targets_truncated")] = json!(truncated);
+        }
+    }
+    Ok(Edge {
+        source,
+        target,
+        file,
+        line,
+        extra,
+        wire,
+    })
+}
+
 fn read_edges(conn: &Connection, incoming: bool, key: &str, kind: &str) -> Result<Vec<Edge>> {
     let field = if incoming {
         "target_qualified"
@@ -88,24 +115,7 @@ fn read_edges(conn: &Connection, incoming: bool, key: &str, kind: &str) -> Resul
     let mut stmt = conn.prepare(&format!(
         "SELECT * FROM edges WHERE {field}=?1 AND kind=?2 ORDER BY id"
     ))?;
-    let rows=stmt.query_map([key,kind], |r| {
-        let source:String=r.get("source_qualified")?; let target:String=r.get("target_qualified")?;
-        let file:String=r.get("file_path")?; let line=r.get::<_,Option<i64>>("line")?.unwrap_or_default();
-        let mut wire=json!({"id":r.get::<_,i64>("id")?,"kind":kind,"source":clean(&source),"target":clean(&target),"file_path":file,"line":line,
-            "confidence":r.get::<_,Option<f64>>("confidence")?,"confidence_tier":r.get::<_,Option<String>>("confidence_tier")?});
-        if r.get::<_,Option<String>>("target_resolution")?.as_deref()==Some("unresolved") {wire["target_resolution"]=json!("unresolved");}
-        let extra:Value=r.get::<_,Option<String>>("extra")?.and_then(|raw|serde_json::from_str(&raw).ok()).unwrap_or(Value::Null);
-        for prefix in ["ambiguous","unresolved"] {
-            let key=format!("{prefix}_targets");
-            if let Some(list)=extra[&key].as_array(){
-                let names:Vec<_>=list.iter().take(20).filter_map(Value::as_str).map(clean).collect();
-                let count=extra[format!("{prefix}_target_count")].as_u64().unwrap_or(list.len() as u64);
-                let truncated=count>names.len() as u64 || extra[format!("{prefix}_targets_truncated")]==true;
-                wire[&key]=json!(names); wire[format!("{prefix}_target_count")]=json!(count); wire[format!("{prefix}_targets_truncated")]=json!(truncated);
-            }
-        }
-        Ok(Edge{source,target,file,line,extra,wire})
-    })?;
+    let rows = stmt.query_map([key, kind], edge)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -124,6 +134,61 @@ enum Selection {
     Absent,
     Ambiguous(Value),
 }
+pub(super) fn is_test(n: &Value, root: &Path) -> bool {
+    if n["is_test"] == true {
+        return true;
+    }
+    let path = Path::new(text(n, "file_path"));
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    name.starts_with("test_")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.ends_with("_test.go")
+        || path.strip_prefix(root).is_ok_and(|p| {
+            p.iter().any(|s| {
+                ["test", "tests", "__tests__", "spec"]
+                    .iter()
+                    .any(|part| s == *part)
+            })
+        })
+}
+
+fn fuzzy(conn: &Connection, target: &str, limit: usize) -> Result<(Vec<Value>, usize)> {
+    use rusqlite::params_from_iter;
+    let words: Vec<_> = target.split_whitespace().collect();
+    if words.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    let fts = words
+        .iter()
+        .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let predicates =
+        vec!["(lower(n.name) LIKE ? OR lower(n.qualified_name) LIKE ?)"; words.len()].join(" AND ");
+    let args: Vec<_> = words
+        .iter()
+        .flat_map(|w| {
+            [
+                format!("%{}%", w.to_lowercase()),
+                format!("%{}%", w.to_lowercase()),
+            ]
+        })
+        .collect();
+    for (query,params) in [("FROM nodes_fts f JOIN nodes n ON f.rowid=n.id WHERE nodes_fts MATCH ? AND n.kind!='Output'".to_string(),vec![fts]),(format!("FROM nodes n WHERE {predicates} AND n.kind!='Output'"),args)] {
+        let Ok(mut stmt)=conn.prepare(&format!("SELECT n.* {query} LIMIT {limit}")) else{continue};
+        let Ok(rows)=stmt.query_map(params_from_iter(&params),node) else{continue};
+        let result:Vec<_>=rows.collect::<rusqlite::Result<_>>()?;
+        if result.is_empty(){continue;}
+        let count=if result.len()<limit{result.len()}else{conn.query_row(&format!("SELECT count(*) {query}"),params_from_iter(&params),|r|r.get::<_,i64>(0))? as usize};
+        return Ok((result,count));
+    }
+    Ok((Vec::new(), 0))
+}
+
 fn select(
     conn: &Connection,
     root: &Path,
@@ -152,12 +217,7 @@ fn select(
         candidates = nodes(conn, "name=?1 ORDER BY qualified_name", target)?;
         let non_tests: Vec<_> = candidates
             .iter()
-            .filter(|n| {
-                n["is_test"] == false
-                    && !text(n, "file_path")
-                        .split('/')
-                        .any(|s| matches!(s, "test" | "tests" | "__tests__" | "spec"))
-            })
+            .filter(|n| !is_test(n, root))
             .cloned()
             .collect();
         if !non_tests.is_empty() {
@@ -165,13 +225,13 @@ fn select(
             candidates = non_tests;
         }
     }
-    if candidates.is_empty() {
-        candidates = nodes(
-            conn,
-            "instr(lower(name),lower(?1))>0 ORDER BY qualified_name LIMIT 101",
-            target,
-        )?;
-    }
+    let count = if candidates.is_empty() {
+        let (found, total) = fuzzy(conn, target, 20)?;
+        candidates = found;
+        total
+    } else {
+        candidates.len()
+    };
     if candidates.is_empty() {
         return Ok(Selection::Absent);
     }
@@ -180,7 +240,23 @@ fn select(
         let target = text(&n, "qualified_name").to_owned();
         return Ok(Selection::Found(n, target, skipped));
     }
-    let count = candidates.len();
+    candidates.sort_by(|a, b| {
+        let rank = |n: &Value| {
+            if n["qualified_name"] == target {
+                0
+            } else if n["name"] == target {
+                1
+            } else if text(n, "qualified_name")
+                .to_lowercase()
+                .contains(&target.to_lowercase())
+            {
+                2
+            } else {
+                3
+            }
+        };
+        (rank(a), text(a, "qualified_name")).cmp(&(rank(b), text(b, "qualified_name")))
+    });
     candidates.truncate(20);
     let result = if minimal {
         candidates.truncate(cap);
@@ -251,6 +327,7 @@ fn pairs(
     }
     let qn = text(selected, "qualified_name");
     match pattern {
+        "tests_for" => return tests_for::run(conn, selected, root),
         "importers_of" => return relationships::importer(conn, selected),
         "inheritors_of" => return relationships::inherits(conn, selected),
         "consumers_of" => {
@@ -401,9 +478,6 @@ pub fn run(conn: &Connection, root: &Path, q: &Query) -> Result<Value> {
             minimal,
         );
     }
-    if !SUPPORTED.contains(&pattern) {
-        bail!("query pattern '{pattern}' is not yet implemented in Rust");
-    }
     if pattern == "callers_of" && terms::BUILTINS.contains(&raw.as_str()) {
         return Ok(
             json!({"status":"ok","pattern":pattern,"target":raw,"description":description,"summary":format!("'{raw}' is a common builtin — callers_of skipped to avoid noise."),
@@ -442,6 +516,15 @@ pub fn run(conn: &Connection, root: &Path, q: &Query) -> Result<Value> {
     }
     if skipped > 0 {
         summary += &format!(" — skipped {skipped} same-named test symbol(s)");
+    }
+    if pattern == "tests_for" {
+        let guesses = rows
+            .iter()
+            .filter(|p| p.row.get("inferred_by").is_some())
+            .count();
+        if guesses > 0 {
+            summary += &format!("; {guesses} of them guesses (see inferred_by)");
+        }
     }
     let mut values = Vec::new();
     let mut edges = Vec::new();
@@ -490,40 +573,6 @@ pub fn run(conn: &Connection, root: &Path, q: &Query) -> Result<Value> {
     Ok(response)
 }
 
-fn empty_confidence(
-    conn: &Connection,
-    root: &Path,
-    target: &str,
-    node: Option<&Value>,
-    pattern: &str,
-) -> Result<String> {
-    let built = store::metadata(conn, "git_head_sha")?.unwrap_or_default();
-    let live = if built.is_empty() {
-        String::new()
-    } else {
-        store::git(root, &["rev-parse", "HEAD"])
-    };
-    let current = !live.is_empty() && live == built;
-    if let Some(n) = node {
-        if let Some(note) = terms::language_gap(text(n, "language"), pattern) {
-            return Ok(note.to_owned());
-        }
-        Ok(if current {
-            format!("'{target}' is indexed and the graph is current, so this 0 is a real absence")
-        } else {
-            format!("'{target}' is indexed and no such edge is recorded; graph currency unverified")
-        })
-    } else if conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM nodes)", [], |r| {
-        r.get::<_, bool>(0)
-    })? {
-        Ok("graph is empty: nothing is indexed, so this 0 says nothing about the code; run `code-review-graph build`".into())
-    } else if !live.is_empty() && live != built {
-        Ok(format!(
-            "graph is stale: no node matching '{target}'; the graph predates HEAD, so run `code-review-graph update` first"
-        ))
-    } else {
-        Ok(format!(
-            "target not indexed: no node matching '{target}', so this 0 is not evidence that none exist"
-        ))
-    }
+pub(super) fn test_count(conn: &Connection, node: &Value) -> Result<usize> {
+    Ok(tests_for::explicit(conn, node)?.0.len())
 }

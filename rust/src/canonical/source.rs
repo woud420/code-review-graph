@@ -1,7 +1,8 @@
 #[path = "extra_edges.rs"]
 mod extra_edges;
+use super::imports::import_target;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use tree_sitter::{Node, Parser};
@@ -16,6 +17,7 @@ pub(super) struct Declaration {
 }
 
 pub(super) struct Source {
+    pub import_details: super::imports::ImportDetails,
     pub extra_edges: extra_edges::ExtraEdges,
     pub language: &'static str,
     pub lines: usize,
@@ -41,7 +43,7 @@ impl Source {
         facts: &crate::model::ParsedFile,
         paths: &BTreeSet<String>,
     ) -> Option<(String, String)> {
-        if self.language != "python" {
+        if self.language != "python" || !self.extra_edges.direct_name(callee) {
             return None;
         }
         let binding = facts
@@ -55,6 +57,27 @@ impl Source {
     }
 
     pub fn parse(path: &Path, source: &str) -> Result<Self> {
+        let language = if crate::parser::bash::supports(path, source.as_bytes()) {
+            Some("bash")
+        } else {
+            match path.extension().and_then(|s| s.to_str()) {
+                Some(ext) if crate::parser::cfamily::supports(ext) => Some("c"),
+                Some("go") => Some("go"),
+                Some("json") => Some("json"),
+                _ => None,
+            }
+        };
+        if let Some(language) = language {
+            return Ok(Self {
+                language,
+                lines: source.lines().count()
+                    + usize::from(source.is_empty() || source.ends_with('\n')),
+                declarations: Default::default(),
+                imports: Default::default(),
+                extra_edges: Default::default(),
+                import_details: Default::default(),
+            });
+        }
         let (language, grammar) = match path.extension().and_then(|ext| ext.to_str()) {
             Some("py") => ("python", tree_sitter_python::LANGUAGE),
             Some("rs") => ("rust", tree_sitter_rust::LANGUAGE),
@@ -71,6 +94,7 @@ impl Source {
             .parse(source, None)
             .context("parsing declaration signatures")?;
         let mut result = Self {
+            import_details: Default::default(),
             extra_edges: extra_edges::ExtraEdges::collect(tree.root_node(), source, language),
             language,
             lines: source.bytes().filter(|b| *b == b'\n').count() + 1,
@@ -80,6 +104,7 @@ impl Source {
         let mut pending = vec![tree.root_node()];
         while let Some(node) = pending.pop() {
             let line = node.start_position().row + 1;
+            result.import_details.observe(node, source, language);
             match node.kind() {
                 "function_definition"
                 | "function_item"
@@ -101,6 +126,21 @@ impl Source {
                             .then(|| super::docs::python(node, source))
                             .flatten();
                         let is_async = node.child(0).is_some_and(|n| n.kind() == "async");
+                        let mut decorators = Vec::new();
+                        if language == "rust" {
+                            for attr in std::iter::successors(node.prev_named_sibling(), |n| {
+                                n.prev_named_sibling()
+                            })
+                            .take_while(|n| n.kind() == "attribute_item")
+                            {
+                                if let Some(value) =
+                                    attr.named_child(0).and_then(|n| n.named_child(0))
+                                {
+                                    decorators.push(text(value, source).to_owned());
+                                }
+                            }
+                            decorators.reverse();
+                        }
                         result.declarations.insert(
                             (line, name.to_owned()),
                             Declaration {
@@ -110,9 +150,13 @@ impl Source {
                                 } else {
                                     field(node, "return_type", source).map(str::to_owned)
                                 },
-                                modifiers: is_async.then(|| "async".into()),
+                                modifiers: if decorators.is_empty() {
+                                    is_async.then(|| "async".into())
+                                } else {
+                                    Some(decorators.join(","))
+                                },
                                 doc,
-                                decorators: Vec::new(),
+                                decorators,
                             },
                         );
                     }
@@ -207,64 +251,4 @@ fn rust_use_paths(
         _ => return,
     };
     out.insert((line, path));
-}
-
-pub(super) fn import_target(
-    file: &str,
-    module: &str,
-    language: &str,
-    paths: &BTreeSet<String>,
-) -> Option<String> {
-    let parent = Path::new(file).parent()?;
-    let mut candidates = Vec::new();
-    if language == "python" {
-        let module_name = module.trim_start_matches('.');
-        let depth = module.len() - module_name.len();
-        let mut dir = if depth == 0 {
-            PathBuf::new()
-        } else {
-            parent.to_owned()
-        };
-        for _ in 1..depth {
-            if !dir.pop() {
-                return None;
-            }
-        }
-        if !module_name.is_empty() {
-            dir.extend(module_name.split('.'));
-        }
-        candidates.push(dir.with_extension("py"));
-        candidates.push(dir.join("__init__.py"));
-    } else if module.starts_with("./") || module.starts_with("../") {
-        let mut dir = parent.to_owned();
-        for part in Path::new(module).components() {
-            match part {
-                Component::CurDir => {}
-                Component::ParentDir if dir.pop() => {}
-                Component::Normal(name) => dir.push(name),
-                _ => return None,
-            }
-        }
-        candidates.push(dir.clone());
-        if matches!(
-            dir.extension().and_then(|s| s.to_str()),
-            Some("js" | "jsx" | "mjs" | "cjs")
-        ) {
-            for extension in ["ts", "tsx", "mts", "cts"] {
-                candidates.push(dir.with_extension(extension));
-            }
-        } else if dir.extension().is_none() {
-            for extension in ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"] {
-                candidates.push(dir.with_extension(extension));
-                candidates.push(dir.join("index").with_extension(extension));
-            }
-        }
-    }
-    candidates
-        .into_iter()
-        .filter_map(|p| {
-            p.to_str()
-                .map(|s| s.replace(std::path::MAIN_SEPARATOR, "/"))
-        })
-        .find(|p| paths.contains(p))
 }

@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 const APPLICATION_ID: i64 = 0x43524752; // "CRGR", distinct from the Python database.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const CALL_SITES: &str = "CREATE TABLE call_sites (
     source_file TEXT NOT NULL, source TEXT NOT NULL, raw_target TEXT NOT NULL,
     target_file TEXT NOT NULL, target TEXT NOT NULL, line INTEGER NOT NULL,
@@ -46,7 +46,7 @@ fn validate(conn: &Connection) -> Result<()> {
         "this is not a code-review-graph-rs database"
     );
     ensure!(
-        version == SCHEMA_VERSION,
+        (1..=SCHEMA_VERSION).contains(&version),
         "unsupported Rust graph schema {version}"
     );
     Ok(())
@@ -75,13 +75,6 @@ impl Graph {
                 tx.execute_batch(SCHEMA)?;
                 tx.execute_batch(CALL_SITES)?;
                 tx.pragma_update(None, "application_id", APPLICATION_ID)?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            }
-            if tx.query_row("PRAGMA application_id", [], |r| r.get::<_, i64>(0))? == APPLICATION_ID
-                && tx.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? == 1
-            {
-                tx.execute_batch(CALL_SITES)?;
-                tx.execute("UPDATE files SET hash=''", [])?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
             validate(&tx)?;
@@ -124,6 +117,11 @@ impl Graph {
             rebuild || previous_root.as_deref().is_none_or(|s| s == root_name),
             "this graph belongs to a different repository; run build to replace it"
         );
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version == 1 {
+            tx.execute_batch(CALL_SITES)?;
+        }
+        let rebuild = rebuild || version != SCHEMA_VERSION;
         tx.execute(
             "INSERT INTO metadata VALUES('root', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [root_name],
@@ -157,6 +155,7 @@ impl Graph {
         }
         if rebuild || files_parsed > 0 || files_deleted > 0 {
             resolve_graph(&tx)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         let Stats {
             files,
@@ -311,7 +310,23 @@ fn source_files(root: &Path) -> Result<Vec<String>> {
         }
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if JS_EXTENSIONS.contains(&ext) || matches!(ext, "py" | "rs") {
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let json = ext == "json"
+            && !matches!(
+                file_name,
+                "package-lock.json" | "npm-shrinkwrap.json" | "project.assets.json"
+            )
+            && !file_name.ends_with(".lock.json")
+            && !file_name.ends_with(".min.json");
+        if JS_EXTENSIONS.contains(&ext)
+            || matches!(ext, "py" | "rs" | "go")
+            || json
+            || crate::parser::cfamily::supports(ext)
+            || crate::parser::bash::discover(path)
+        {
             let relative = path
                 .strip_prefix(root)?
                 .to_str()
@@ -396,6 +411,7 @@ fn member_name(binding: &str, suffix: &str) -> Option<String> {
 }
 
 struct Resolver {
+    ts_paths: crate::tsconfig::TsPaths,
     modules: BTreeMap<String, Module>,
 }
 
@@ -489,7 +505,9 @@ impl Resolver {
 
     fn module_path(&self, from: &str, specifier: &str) -> Option<String> {
         if !specifier.starts_with("./") && !specifier.starts_with("../") {
-            return None;
+            return self
+                .ts_paths
+                .resolve(from, specifier, |p| self.modules.contains_key(p));
         }
         let mut base = PathBuf::from(from).parent()?.to_owned();
         for component in Path::new(specifier).components() {
@@ -613,7 +631,8 @@ impl Resolver {
     fn python_member(&self, file: &str, member: &crate::model::PythonMember) -> Option<Target> {
         use crate::model::PythonType;
         let class = match &member.receiver {
-            PythonType::Named(annotation) => {
+            PythonType::Builtin => return None,
+            PythonType::Named(annotation) | PythonType::Parameter(annotation) => {
                 self.resolve_binding(file, annotation_name(annotation, None)?, member.line)?
             }
             PythonType::Returned { callee, element } => {
@@ -685,6 +704,64 @@ impl Resolver {
         {
             return self.resolve_binding(file, &format!("{class}.{method}"), line);
         }
+        if let Some(site) = self.modules[file].facts.cfamily.site(caller, name, line) {
+            return site.target.as_ref().map(|n| (file.into(), n.clone()));
+        }
+        if file.ends_with(".go") {
+            let module = &self.modules[file];
+            if module
+                .facts
+                .go
+                .selector(caller, name, line)
+                .is_some_and(|s| !s.own)
+            {
+                return None;
+            }
+            return (module.symbol_counts.get(name) == Some(&1))
+                .then(|| (file.into(), name.into()));
+        }
+        if let Some((class, method)) = name.rsplit_once('.')
+            && !self.modules[file].facts.typescript.bases.is_empty()
+        {
+            let mut stack = vec![(file.to_owned(), class.to_owned())];
+            let mut seen = HashSet::new();
+            while let Some((path, owner)) = stack.pop() {
+                if !seen.insert((path.clone(), owner.clone())) {
+                    continue;
+                }
+                let candidate = format!("{owner}.{method}");
+                if self.modules[&path].symbol_counts.get(&candidate) == Some(&1) {
+                    return Some((path, candidate));
+                }
+                if let Some(parents) = self.modules[&path].facts.typescript.bases.get(&owner) {
+                    stack.extend(
+                        parents
+                            .iter()
+                            .filter_map(|base| self.resolve_binding(&path, base, 0)),
+                    );
+                }
+            }
+        }
+        if !self.modules[file].facts.bash_imports.is_empty() {
+            if let Some(local) = self.resolve_binding(file, name, line) {
+                return Some(local);
+            }
+            let mut found = BTreeSet::new();
+            for (_, path) in &self.modules[file].facts.bash_imports {
+                let Some(path) = crate::parser::bash::sourced_file(file, path) else {
+                    continue;
+                };
+                if let Some(module) = self.modules.get(&path)
+                    && module.symbol_counts.get(name) == Some(&1)
+                {
+                    found.insert((path, name.to_owned()));
+                }
+            }
+            if found.len() == 1 {
+                return found.pop_first();
+            }
+            return None;
+        }
         // A nested definition shadows outer bindings. Sibling methods require a receiver.
         if file.ends_with(".py") {
             let module = &self.modules[file];
@@ -745,7 +822,7 @@ impl Resolver {
     }
 }
 
-fn annotation_name(annotation: &str, index: Option<usize>) -> Option<&str> {
+pub(crate) fn annotation_name(annotation: &str, index: Option<usize>) -> Option<&str> {
     let value = annotation.trim().trim_matches(['\'', '"']).trim();
     if let Some(index) = index {
         let items = value
@@ -800,7 +877,11 @@ fn resolve_graph(tx: &Transaction<'_>) -> Result<()> {
             .with_context(|| format!("reading stored facts for {file}"))?;
         modules.insert(file, Module::new(facts));
     }
-    let mut resolver = Resolver { modules };
+    let root: String = tx.query_row("SELECT value FROM metadata WHERE key='root'", [], |r| {
+        r.get(0)
+    })?;
+    let ts_paths = crate::tsconfig::TsPaths::load(Path::new(&root), modules.keys());
+    let mut resolver = Resolver { modules, ts_paths };
     let imports: Vec<_> = resolver
         .modules
         .iter()

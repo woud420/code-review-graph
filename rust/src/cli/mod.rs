@@ -1,4 +1,7 @@
 mod args;
+mod build;
+mod changes;
+mod history;
 mod mcp;
 mod prompts;
 mod query;
@@ -48,6 +51,17 @@ pub fn dispatch() -> Result<()> {
         return Ok(());
     };
     match command {
+        Command::ContextHistory {
+            location,
+            by,
+            days,
+            json,
+        } => {
+            let given = root(location.repo.as_deref(), false)?;
+            let root = store::project_root(&given).unwrap_or(given);
+            let db = store::database(&root, location.data_dir.as_deref());
+            history::print(db.with_file_name("context-history.jsonl"), &by, days, json)
+        }
         Command::Repos => registry::print(),
         Command::Register { path, alias } => registry::register(&path, alias),
         Command::Unregister { path_or_alias } => registry::unregister(&path_or_alias),
@@ -122,6 +136,35 @@ pub fn dispatch() -> Result<()> {
             println!("{}", wire::json_text(&data, true));
             Ok(())
         }
+        Command::Impact {
+            repo,
+            files,
+            depth,
+            max_results,
+            max_files,
+            base,
+            detail_level,
+        } => print_report(
+            repo.as_deref(),
+            "get_impact_radius_tool",
+            serde_json::json!({"changed_files":files,"max_depth":depth,"max_results":max_results,"max_files":max_files,"base":base,"detail_level":detail_level}),
+        ),
+        Command::Architecture { repo, detail_level } => print_report(
+            repo.as_deref(),
+            "get_architecture_overview_tool",
+            serde_json::json!({"detail_level":detail_level}),
+        ),
+        Command::LargeFunctions {
+            repo,
+            min_lines,
+            kind,
+            path,
+            limit,
+        } => print_report(
+            repo.as_deref(),
+            "find_large_functions_tool",
+            serde_json::json!({"min_lines":min_lines,"kind":kind,"file_path_pattern":path,"limit":limit}),
+        ),
         Command::Flows {
             repo,
             sort,
@@ -294,7 +337,14 @@ fn print_report(repo: Option<&Path>, name: &str, args: serde_json::Value) -> Res
     let db = store::database(&root, None);
     let conn = store::open(&db)?;
     store::check_root(&conn, &db, &root)?;
-    let data = reports::run(&conn, &root, name, &args, &reports::Hints::default())?;
+    let label = match name {
+        "get_architecture_overview_tool" => Some("architecture"),
+        "get_impact_radius_tool" => Some("impact"),
+        _ => None,
+    };
+    let data = history::with_label(label, || {
+        reports::run(&conn, &root, name, &args, &reports::Hints::default())
+    })?;
     println!("{}", wire::json_text(&data, true));
     Ok(())
 }

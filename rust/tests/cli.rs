@@ -90,3 +90,37 @@ fn concurrent_build_reports_the_process_that_holds_the_lock() {
     assert!(String::from_utf8_lossy(&busy.stderr).contains("PID 12345"));
     assert!(!dir.join("graph.db").exists());
 }
+
+#[test]
+fn json_paths_merge_array_locations_and_exclude_values() {
+    let repo = tempdir().unwrap();
+    let root = repo.path().canonicalize().unwrap();
+    fs::write(
+        root.join("settings.json"),
+        r#"{"items":[{"price":"private-value"},{"price":9}]}"#,
+    )
+    .unwrap();
+    success(cli(&root, &["build", "--skip-flows"]));
+    let db = Connection::open(root.join(".code-review-graph/graph.db")).unwrap();
+    let extra: String = db
+        .query_row(
+            "SELECT extra FROM nodes WHERE kind='JsonPath' AND name='$.items[*].price'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&extra).unwrap();
+    assert_eq!(meta["value_type"], "mixed");
+    assert_eq!(meta["occurrence_count"], 2);
+    assert_eq!(meta["value_types"], serde_json::json!(["number", "string"]));
+    assert!(!extra.contains("private-value"));
+    let cache = Connection::open(root.join(".code-review-graph/graph.rust-cache")).unwrap();
+    let facts: String = cache
+        .query_row(
+            "SELECT facts FROM files WHERE path='settings.json'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!facts.contains("private-value"));
+}

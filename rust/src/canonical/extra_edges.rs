@@ -105,6 +105,10 @@ impl ExtraEdges {
         facts
     }
 
+    pub(in crate::canonical) fn direct_name(&self, name: &str) -> bool {
+        self.defined.contains(name) || self.imported.contains_key(name)
+    }
+
     pub(in crate::canonical) fn rows(
         &self,
         root: &Path,
