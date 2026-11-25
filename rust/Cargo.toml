@@ -1,0 +1,25 @@
+[package]
+name = "code-review-graph-rs"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Local incremental code graph with SQLite-backed caller queries"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+rmcp = { version = "3.11", features = ["transport-io"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+tree-sitter = "0.26"
+tree-sitter-javascript = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+
+[dev-dependencies]
+tempfile = "3"
