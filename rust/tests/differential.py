@@ -67,7 +67,7 @@ def load_reference(source):
 def git(repo, *arguments):
     subprocess.run(
         ["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
-         "-c", "user.name=Oracle", "-c", "user.email=oracle@example.invalid", *arguments],
+         "-c", "maintenance.auto=false", "-c", "user.name=Oracle", "-c", "user.email=oracle@example.invalid", *arguments],
         check=True, capture_output=True, text=True, timeout=20,
     )
 
