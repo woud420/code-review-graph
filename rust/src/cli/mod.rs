@@ -62,16 +62,9 @@ pub fn dispatch() -> Result<()> {
     };
     match command {
         Command::Install(options) => install::run(options),
-        Command::Uninstall(options) => install::unbind(options),
+        Command::Uninstall(options) => install::uninstall::run(options),
         Command::Readonly { args } => std::process::exit(install::readonly(&args)?),
-        Command::Eval { report, output_dir } => {
-            if report {
-                eval::report(&output_dir)
-            } else {
-                println!("Specify --all, --repo, or --benchmark. See --help.");
-                Ok(())
-            }
-        }
+        Command::Eval(opts) => opts.run(),
         Command::DeadCode {
             location,
             kind,
@@ -414,7 +407,19 @@ pub fn dispatch() -> Result<()> {
             let args = serde_json::json!({"flows":!no_flows,"communities":!no_communities,"fts":!no_fts,"embedding_provider":embedding_provider,"embedding_model":embedding_model});
             build::postprocess_cli(&root, &path, &args, wait)
         }
-        Command::Build(ref args) | Command::Update(ref args) => {
+        Command::Build(ref args)
+        | Command::Update {
+            write: ref args, ..
+        } => {
+            let (base, brief, verify) = match &command {
+                Command::Update {
+                    base,
+                    brief,
+                    verify,
+                    ..
+                } => (base.as_deref(), *brief, *verify),
+                _ => (None, false, false),
+            };
             let full = matches!(command, Command::Build(_));
             let root = root(args.location.repo.as_deref(), false)?;
             if !full && args.location.repo.is_none() && store::project_root(&root).is_none() {
@@ -454,7 +459,11 @@ pub fn dispatch() -> Result<()> {
                 level,
                 args.wait,
                 refresh,
-                canonical::Sources::Repository(args.links.explicit()),
+                canonical::Sources::Build {
+                    follow: args.links.explicit(),
+                    base,
+                    recurse_submodules: None,
+                },
             ) {
                 Err(error)
                     if error
@@ -472,6 +481,9 @@ pub fn dispatch() -> Result<()> {
                         "Skipped: Another code-review-graph write is already running for this repository ({holder}); skipped instead of repeating the work. Pass wait_for_lock=True (CLI: --wait) to block until it finishes."
                     );
                     std::process::exit(75);
+                }
+                Err(error) if error.is::<canonical::DiscoveryError>() => {
+                    anyhow::bail!("Error: {error}")
                 }
                 other => other?,
             };
@@ -559,6 +571,14 @@ pub fn dispatch() -> Result<()> {
                         report.files_parsed, report.updated_nodes, report.updated_edges
                     );
                 }
+            }
+            if brief && !args.quiet {
+                reports::detect::update_brief(
+                    &db,
+                    &root,
+                    report.base.as_deref().unwrap_or("HEAD~1"),
+                    verify,
+                )?;
             }
             build::log_refresh(&report.embeddings);
             Ok(())

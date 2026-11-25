@@ -19,6 +19,16 @@ Use `--skip-flows` for a build with signatures and text search. Use `--skip-post
 
 The earlier `code-review-graph-rs` binary exposes the original proof interface. It stores a separate index in `.code-review-graph-rs/graph.db`. Its `query callers-of` and `query callees-of` commands report distinct symbols. The public binary's `query callers_of` and `query callees_of` also expose the individual call sites.
 
+## Platform integrations
+
+Use `code-review-graph install --platform NAME --repo PATH --dry-run` to preview a registration. Both `install` and `init` detect installed clients by default. A named platform can be configured before its client is installed.
+
+The native executable registers itself with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen Code, Kiro, Qoder, GitHub Copilot, GitHub Copilot CLI, CodeBuddy Code, Hermes Agent and DeepSeek Harness. `install --help` lists their flag spellings. Claude Code and CodeBuddy share the repository’s `.mcp.json`. OpenCode and MiMo Code store the project argument in a command array. Hermes Agent and DeepSeek Harness use a global launcher and take the repository from each request.
+
+The native installer writes project instructions for the selected clients, workflow skills for Claude Code, Codex, Gemini CLI, Hermes Agent, Qoder and CodeBuddy, and hook settings and scripts for the clients that support them. It selects the OpenCode plugin for the installed 1.x or 2.x host. Use `--no-hooks --no-skills --no-instructions` for a registration-only installation.
+
+Use `uninstall --platform NAME` to remove a binding while retaining the graph. Full `uninstall` previews the repository and user files it will remove or edit. `--keep-data` preserves the index, `--keep-user-configs` limits cleanup to repositories, and `--all-repos` includes repositories in the registry. Registered external graph data directories are preserved.
+
 ## Verification
 
 The comparison uses upstream commit `7ba9d17ab6fd281026b914d8da4c0dc98d013474`. From the repository root, create the reference environment and run the comparisons. An existing external checkout of that exact revision also works.
@@ -45,3 +55,13 @@ For Claude Code and Codex, `install --platform claude` and `install --platform c
 The embedding comparison uses local HTTP servers for the OpenAI-compatible and Voyage formats. Optional local transformer inference and Google model inference are outside that comparison.
 
 For an architecture check, run `deslop-please` at the workspace root with `rust-analyzer` on the executable search path.
+
+### Optional token verification
+
+Build with `cargo build --release --locked --features tokenizer` to measure `update --brief --verify` and `detect-changes --brief --verify` with the bundled cl100k_base vocabulary. Token counting runs offline inside the native binary.
+
+### Optional SVG export
+
+Build the native renderer with `cargo build --release --locked --features svg`. The resulting `code-review-graph visualize --format svg` command writes `.code-review-graph/graph.svg` entirely offline. It draws directed edges, colors nodes by kind and shows labels on graphs of up to 100 nodes. Below 500 nodes it uses the reference spring layout with seed 42. Larger graphs use sampled repulsion to bound layout work. SVG elements, typefaces, margins and large-graph positions differ from Matplotlib’s output.
+
+`make svg-parity REFERENCE=/path/to/reference PYTHON=/path/to/reference/.venv/bin/python` compares rendered XML, small-graph normalized node positions and repeatability on five graph sizes. The comparison needs Matplotlib, NumPy and SciPy in the reference environment. Set `SVG_REFERENCE_PACKAGES` if these are installed in a separate site-packages directory.

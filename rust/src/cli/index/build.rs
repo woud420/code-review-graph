@@ -53,14 +53,6 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
         "repo_root does not look like a project root (no .git, .svn, or .code-review-graph directory found): {}",
         root.display()
     );
-    ensure!(
-        args["base"].is_null(),
-        "explicit incremental base is not supported by the native writer"
-    );
-    ensure!(
-        args["recurse_submodules"] != true || !root.join(".gitmodules").exists(),
-        "recursive submodule indexing is not supported by the native writer"
-    );
     let level = match args["postprocess"].as_str().unwrap_or("full") {
         "full" => Level::Full,
         "minimal" => Level::Minimal,
@@ -68,16 +60,30 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
         other => anyhow::bail!("invalid postprocess level: {other}"),
     };
     let db_path = store::database(root, None);
-    let result = match canonical::index_with_embeddings(
+    let sources = canonical::Sources::Build {
+        follow: None,
+        base: args["base"].as_str(),
+        recurse_submodules: args["recurse_submodules"].as_bool(),
+    };
+    let result = match canonical::index_sources(
         root,
         &db_path,
         args["full_rebuild"].as_bool().unwrap_or(false),
         level,
         false,
         refresh_request(args),
+        sources,
     ) {
         Err(e) if e.to_string() == "another writer is using this graph" => {
             return Ok(contended(&db_path, "skipped instead of repeating the work"));
+        }
+        Err(e) if e.is::<canonical::DiscoveryError>() => {
+            let err = e.downcast::<canonical::DiscoveryError>()?;
+            return Ok(
+                json!({"status":"error","build_type":"incremental","base_resolved":err.base,
+                "files_updated":0,"errors":[],"error":err.reason,"summary":err.to_string(),
+                "postprocess_level":args["postprocess"].as_str().unwrap_or("full")}),
+            );
         }
         other => other?,
     };
@@ -91,26 +97,47 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
         if no_change {
             value["flow_entry_point_qns"] = json!([]);
         }
-        value["communities_were_affected"] = false.into();
+        value["communities_were_affected"] = result.communities_affected.into();
         value["errors"] = json!([]);
-        value["freshness_advanced"] = result.base.is_some().into();
+        value["freshness_advanced"] = result.freshness_advanced.into();
         value
     };
     if result.full {
         full_resolvers(&mut report, &db)?;
-    } else {
-        for name in [
-            "python_resolution",
-            "rescript_resolution",
-            "spring_resolution",
-            "aop_resolution",
-            "event_resolution",
-            "temporal_resolution",
-            "hcl_resolution",
-            "scoped_resolution",
-            "jedi_enrichment",
+    } else if !result.changed_files.is_empty() || result.freshness_advanced || !no_change {
+        let mut available = json!({});
+        let updated = result
+            .changed_files
+            .iter()
+            .chain(&result.dependent_files)
+            .collect::<Vec<_>>();
+        for (name, extensions) in [
+            ("python_resolution", &["py"][..]),
+            ("rescript_resolution", &["res", "resi"]),
+            ("spring_resolution", &["java"]),
+            ("aop_resolution", &["java"]),
+            ("event_resolution", &["java"]),
+            ("temporal_resolution", &["java"]),
+            ("hcl_resolution", &["tf", "hcl"]),
+            ("scoped_resolution", &["php", "rs", "cs", "csproj"]),
+            ("jedi_enrichment", &["py"]),
         ] {
-            report[name] = Value::Null;
+            let relevant = !no_change
+                && updated.iter().any(|p| {
+                    Path::new(p)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|ext| extensions.contains(&ext))
+                        && (name != "jedi_enrichment" || root.join(p).is_file())
+                });
+            if relevant && available.as_object().is_some_and(|o| o.is_empty()) {
+                full_resolvers(&mut available, &db)?;
+            }
+            report[name] = if relevant {
+                available[name].take()
+            } else {
+                Value::Null
+            };
         }
     }
     report["status"] = "ok".into();
@@ -118,7 +145,7 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
     report["base_resolved"] = json!(result.base);
     report["summary"]=if result.full {
         format!("Full build complete: parsed {} files, created {} nodes and {} edges.",result.files_parsed,result.nodes,result.edges)
-    } else if no_change && result.base.is_some() {"No changes detected. Graph is up to date.".into()}
+    } else if no_change && result.freshness_advanced {"No changes detected. Graph is up to date.".into()}
     else if no_change {"No graph changes detected. Freshness metadata was not advanced.".into()}
     else {format!("Incremental update: {} files re-parsed, {} nodes and {} edges updated. Changed: {}. Dependents also updated: {}.",
         result.files_parsed,result.updated_nodes,result.updated_edges,wire::value_repr(&report["changed_files"]),wire::value_repr(&report["dependent_files"]))}.into();

@@ -49,7 +49,7 @@ pub enum Command {
     #[command(visible_alias = "init")]
     Install(super::install::Options),
     /// Remove a platform's graph server registration.
-    Uninstall(super::install::Uninstall),
+    Uninstall(super::install::uninstall::Options),
     #[command(hide = true)]
     Readonly {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -161,7 +161,16 @@ pub enum Command {
     /// Full raw graph build.
     Build(Write),
     /// Incrementally update the raw graph.
-    Update(Write),
+    Update {
+        #[command(flatten)]
+        write: Write,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        brief: bool,
+        #[arg(long)]
+        verify: bool,
+    },
     /// Search graph entities by name or keyword.
     Search {
         query: String,
@@ -185,13 +194,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Generate a report from evaluation results.
-    Eval {
-        #[arg(long)]
-        report: bool,
-        #[arg(long, default_value = "evaluate/results")]
-        output_dir: PathBuf,
-    },
+    /// Run evaluation benchmarks or generate a report.
+    Eval(super::eval::runner::Options),
     /// Preview graph-backed refactors.
     Refactor {
         #[arg(value_parser=["rename","dead_code","suggest"])]

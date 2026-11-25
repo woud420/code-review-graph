@@ -1,3 +1,10 @@
+mod agent_baseline;
+mod changes;
+mod config;
+mod fidelity;
+mod multi_hop;
+mod performance;
+pub(in crate::cli) mod runner;
 use anyhow::{Context, Result, bail};
 use std::{
     collections::BTreeMap,
@@ -16,6 +23,13 @@ const BENCHMARKS: [(&str, &str); 8] = [
     ("incremental_fidelity", "Incremental Fidelity"),
 ];
 const METHODOLOGY: &str = "# Evaluation Report\n\n## Methodology\n\nBenchmarks are run against real open-source repositories.\nToken counts use a consistent `len(text) // 4` approximation.\nImpact accuracy reports two ground-truth modes: graph-derived (circular — upper bound) and co-change (files co-changed in the same commit, seed excluded).\nRows with `status=error` are kept for forensics but excluded from all aggregates.\nIncremental fidelity compares an incrementally updated graph against a clean rebuild of the same tree; `status=known_failure` marks a divergence that is already recorded in `incremental_fidelity.KNOWN_FAILURES`.\n";
+// Round the binary float directly, matching Python round(value, digits) at decimal ties.
+fn round(value: f64, digits: usize) -> f64 {
+    format!("{value:.digits$}")
+        .parse()
+        .expect("finite numeric metric")
+}
+
 type Row = BTreeMap<String, Option<String>>;
 
 #[derive(Default)]

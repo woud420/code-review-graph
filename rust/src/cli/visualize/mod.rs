@@ -4,6 +4,8 @@ mod group;
 mod neighbourhood;
 mod options;
 mod serve;
+#[cfg(feature = "svg")]
+mod svg;
 use super::{query::text, wire};
 use anyhow::Result;
 pub(super) use options::Options;
@@ -103,6 +105,7 @@ pub(super) fn run(opt: Options) -> Result<()> {
     let (root, db) = opt.database()?;
     let conn = super::store::open(&db)?;
     super::store::check_root(&conn, &db, &root)?;
+    #[cfg(not(feature = "svg"))]
     if opt.format == "svg" {
         anyhow::bail!(
             "Error: SVG export requires matplotlib. Run: pip install \"code-review-graph[eval]\""
@@ -117,7 +120,24 @@ pub(super) fn run(opt: Options) -> Result<()> {
 fn write(conn: &Connection, db: &Path, opt: &Options, patterns: &[String]) -> Result<()> {
     let (format, mode, sidecar) = (opt.format.as_str(), opt.mode.as_str(), opt.sidecar);
     let path = db.with_file_name(format!("graph.{format}"));
-    let mut data = data::read(conn)?;
+    let mut data = if opt.seeded() {
+        let selection = opt
+            .validate_depth()
+            .and_then(|_| data::seeded(conn, opt, patterns));
+        match selection {
+            Ok(payload) => payload,
+            Err(error) => {
+                eprintln!("visualize: {error}");
+                std::process::exit(2)
+            }
+        }
+    } else {
+        data::read(conn)?
+    };
+    #[cfg(feature = "svg")]
+    if format == "svg" {
+        return svg::write(&data, &path);
+    }
     if format == "obsidian" {
         return export::obsidian(&db.with_file_name("obsidian"), &data);
     }
@@ -147,18 +167,6 @@ fn write(conn: &Connection, db: &Path, opt: &Options, patterns: &[String]) -> Re
         }
         println!("{label} exported: {}", path.display());
         return Ok(());
-    }
-    if opt.seeded() {
-        let selection = opt
-            .validate_depth()
-            .and_then(|_| neighbourhood::extract(&data, opt, patterns));
-        data = match selection {
-            Ok(payload) => payload,
-            Err(error) => {
-                eprintln!("visualize: {error}");
-                std::process::exit(2)
-            }
-        };
     }
     let nodes = data["nodes"].as_array().unwrap();
     let edges = data["edges"].as_array().unwrap();

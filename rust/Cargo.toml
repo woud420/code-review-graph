@@ -21,7 +21,12 @@ path = "src/main.rs"
 name = "crg-daemon"
 path = "src/daemon_main.rs"
 
+[features]
+svg = []
+tokenizer = ["dep:tiktoken-rs"]
+
 [dependencies]
+tiktoken-rs = { version = "0.12.1", optional = true }
 anyhow = "1"
 blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -83,3 +88,4 @@ tree-sitter-gdscript = "6.1.0"
 tree-sitter-objc = "3.0.2"
 tree-sitter-perl = "1.1.2"
 tree-sitter-html = "0.23.2"
+serde_yaml_ng = "0.10"

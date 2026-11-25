@@ -42,6 +42,10 @@ impl Options {
         Ok((root, db))
     }
 
+    pub(super) fn path_query(&self) -> Option<(&str, &str)> {
+        self.path_from.as_deref().zip(self.path_to.as_deref())
+    }
+
     pub(super) fn symbols(&self) -> &[String] {
         &self.seed_symbol
     }

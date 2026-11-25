@@ -6,21 +6,22 @@ pub(crate) mod extensions;
 pub(crate) mod go;
 use config::{hcl, json};
 mod java;
+#[path = "parser/extensions/scripting/lua.rs"]
 mod lua;
 pub(crate) mod php;
 pub(crate) mod ruby;
+pub(crate) mod rust;
 mod solidity;
 pub(crate) mod sql;
 mod syntax;
 mod typescript;
 pub(crate) use config::yaml;
 use std::path::Path;
-use syntax::{direct_target, field, record};
 
 use anyhow::{Context, Result, bail};
-use tree_sitter::{Node, Parser};
+use tree_sitter::Parser;
 
-use crate::model::{Call, ParsedFile};
+use crate::model::ParsedFile;
 
 mod python;
 
@@ -92,104 +93,7 @@ pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
     if path.extension().is_some_and(|e| e == "py") {
         return Ok(python::extract(tree.root_node(), source));
     }
-    let mut file = ParsedFile::default();
-    walk(tree.root_node(), source, &mut file, "", "<module>");
-    Ok(file)
-}
-
-fn rust_test(node: Node<'_>, source: &str) -> bool {
-    std::iter::successors(node.prev_named_sibling(), |n| n.prev_named_sibling())
-        .take_while(|n| n.kind() == "attribute_item")
-        .any(|attr| {
-            let mut cursor = attr.walk();
-            attr.named_children(&mut cursor).any(|n| {
-                n.named_child(0)
-                    .is_some_and(|key| source[key.byte_range()].rsplit("::").next() == Some("test"))
-            })
-        })
-}
-
-fn in_dead_rust_branch(node: Node<'_>, src: &str) -> bool {
-    let mut next = node.parent();
-    while let Some(parent) = next {
-        if parent.kind() == "impl_item" {
-            return false;
-        }
-        if parent.kind() == "if_expression"
-            && let (Some(mut condition), Some(body)) = (
-                parent.child_by_field_name("condition"),
-                parent.child_by_field_name("consequence"),
-            )
-        {
-            while condition.kind() == "parenthesized_expression"
-                && let Some(inner) = condition.named_child(0)
-            {
-                condition = inner;
-            }
-            if condition.kind() == "boolean_literal"
-                && &src[condition.byte_range()] == "false"
-                && node.start_byte() >= body.start_byte()
-                && node.end_byte() <= body.end_byte()
-            {
-                return true;
-            }
-        }
-        next = parent.parent();
-    }
-    false
-}
-
-fn walk(node: Node<'_>, source: &str, file: &mut ParsedFile, class: &str, caller: &str) {
-    let mut scope = class;
-    let mut owner = caller;
-    let qualified;
-    match node.kind() {
-        "struct_item" | "enum_item" | "trait_item" => {
-            if let Some(name) = field(node, "name", source) {
-                scope = name;
-                record(file, node, name, "Class");
-            }
-        }
-        "impl_item" => scope = field(node, "type", source).unwrap_or(""),
-        "function_item" | "function_signature_item" => {
-            if let Some(name) = field(node, "name", source) {
-                qualified = if class.is_empty() {
-                    name.to_owned()
-                } else {
-                    format!("{class}.{name}")
-                };
-                owner = &qualified;
-                let is_test = rust_test(node, source);
-                record(file, node, owner, if is_test { "Test" } else { "Function" });
-            }
-        }
-        "macro_invocation" | "call_expression" if in_dead_rust_branch(node, source) => return,
-        "macro_invocation" => {
-            if let Some(name) = field(node, "macro", source) {
-                file.calls.push(Call {
-                    caller: caller.to_owned(),
-                    callee: name.to_owned(),
-                    line: node.start_position().row + 1,
-                });
-            }
-        }
-        "call_expression" => {
-            if let Some(fun) = node.child_by_field_name("function")
-                && let Some(target) = direct_target(fun, source, class)
-            {
-                file.calls.push(Call {
-                    caller: caller.to_owned(),
-                    callee: target,
-                    line: node.start_position().row + 1,
-                });
-            }
-        }
-        _ => {}
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        walk(child, source, file, scope, owner);
-    }
+    Ok(rust::extract(tree.root_node(), source, path))
 }
 
 #[cfg(test)]

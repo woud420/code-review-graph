@@ -42,7 +42,7 @@ fn compact(n: usize) -> String {
     }
 }
 
-pub(super) fn panel(result: &Value, baseline: usize) {
+pub(super) fn panel(result: &Value, baseline: usize, verified: Option<(usize, usize)>) {
     if baseline == 0 {
         return;
     }
@@ -61,6 +61,20 @@ pub(super) fn panel(result: &Value, baseline: usize) {
             grouped(saved)
         ),
     ];
+    if let Some((original, returned)) = verified {
+        let saved = original.saturating_sub(returned);
+        let percent = if original == 0 {
+            0
+        } else {
+            (100. * saved as f64 / original as f64).round_ties_even() as usize
+        };
+        lines.push(format!(
+            "Verified (tiktoken):    {:>9} tokens (~{percent}%)  [{} → {}]",
+            grouped(saved),
+            grouped(original),
+            grouped(returned)
+        ));
+    }
     let mut terms = Vec::new();
     let mut total = 0;
     for (key, label) in [

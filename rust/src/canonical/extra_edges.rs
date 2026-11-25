@@ -1,4 +1,5 @@
 use super::{field, import_target, text};
+use crate::canonical::imports::rust;
 use crate::model::ParsedFile;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -11,6 +12,7 @@ pub(in crate::canonical) struct ExtraEdges {
     imported: BTreeMap<String, (String, String)>,
     submodule_imports: Vec<(String, usize)>,
     implements: Vec<(String, String, usize)>,
+    rust_imports: BTreeMap<String, String>,
 }
 
 impl ExtraEdges {
@@ -24,6 +26,19 @@ impl ExtraEdges {
             let line = node.start_position().row + 1;
             let mut owner = owner;
             match node.kind() {
+                "function_item"
+                | "function_signature_item"
+                | "enum_item"
+                | "trait_item"
+                | "struct_item" => {
+                    if node.parent() == Some(root)
+                        && let Some(name) = field(node, "name", source)
+                    {
+                        facts.defined.insert(name.to_owned());
+                    }
+                    owner = matches!(node.kind(), "function_item" | "function_signature_item")
+                        .then_some(line);
+                }
                 "function_definition" | "class_definition" => {
                     let mut parent = node.parent();
                     if parent.is_some_and(|n| n.kind() == "decorated_definition") {
@@ -68,7 +83,13 @@ impl ExtraEdges {
                         );
                     }
                 }
-                "identifier" if language == "python" && in_value_position(node) => {
+                "identifier"
+                    if (language == "python" && in_value_position(node))
+                        || (language == "rust"
+                            && node.parent().is_some_and(|p| {
+                                matches!(p.kind(), "arguments" | "argument_list" | "array" | "list")
+                            })) =>
+                {
                     let name = text(node, source);
                     if name.chars().count() > 1
                         && name.chars().any(|c| c.is_lowercase())
@@ -90,11 +111,25 @@ impl ExtraEdges {
                         facts.references.push((owner, name.to_owned(), line));
                     }
                 }
+                "use_declaration" if language == "rust" && node.parent() == Some(root) => {
+                    for (alias, original) in rust::bindings(node, source) {
+                        if alias != "*" {
+                            facts.rust_imports.entry(alias).or_insert(original);
+                        }
+                    }
+                }
                 "impl_item" => {
-                    if let (Some(ty), Some(tr)) =
-                        (field(node, "type", source), field(node, "trait", source))
-                    {
-                        facts.implements.push((ty.to_owned(), tr.to_owned(), line));
+                    if let (Some(ty), Some(tr)) = (
+                        node.child_by_field_name("type"),
+                        node.child_by_field_name("trait"),
+                    ) {
+                        let ty = rust::segments(ty, source);
+                        let tr = rust::segments(tr, source);
+                        if let Some(ty) = ty.last()
+                            && !tr.is_empty()
+                        {
+                            facts.implements.push((ty.to_string(), tr.join("::"), line));
+                        }
                     }
                 }
                 _ => {}
@@ -115,6 +150,7 @@ impl ExtraEdges {
         file: &str,
         facts: &ParsedFile,
         paths: &BTreeSet<String>,
+        project: Option<&rust::Project>,
     ) -> Vec<(&'static str, String, String, usize)> {
         let path = root.join(file).to_string_lossy().into_owned();
         let symbols: BTreeMap<_, _> = facts
@@ -126,6 +162,11 @@ impl ExtraEdges {
         for (owner, name, line) in &self.references {
             let target = if self.defined.contains(name) {
                 format!("{path}::{name}")
+            } else if let Some(original) = self.rust_imports.get(name) {
+                project
+                    .and_then(|p| p.resolve(original))
+                    .map(|file| format!("{}::{name}", file.display()))
+                    .unwrap_or_else(|| name.to_owned())
             } else if let Some((module, original)) = self.imported.get(name) {
                 import_target(file, module, "python", paths)
                     .map(|f| {
@@ -153,10 +194,26 @@ impl ExtraEdges {
             }
         }
         for (ty, tr, line) in &self.implements {
-            let target = if facts.symbols.iter().any(|s| s.name == *tr) {
+            let target = if self.defined.contains(tr) {
                 format!("{path}::{tr}")
             } else {
-                tr.clone()
+                let mut parts = tr.split("::");
+                let head = parts.next().unwrap_or_default();
+                let alias = self.rust_imports.get(head).map(|original| {
+                    std::iter::once(original.as_str())
+                        .chain(parts)
+                        .collect::<Vec<_>>()
+                        .join("::")
+                });
+                alias
+                    .as_deref()
+                    .into_iter()
+                    .chain(std::iter::once(tr.as_str()))
+                    .find_map(|name| {
+                        let file = project?.resolve(name)?;
+                        Some(format!("{}::{}", file.display(), name.rsplit("::").next()?))
+                    })
+                    .unwrap_or_else(|| tr.clone())
             };
             out.push(("IMPLEMENTS", format!("{path}::{ty}"), target, *line));
         }

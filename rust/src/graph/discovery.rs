@@ -198,20 +198,69 @@ pub fn follow_links(explicit: Option<bool>) -> bool {
     })
 }
 
+// A gitlink is a single tracked entry until Git expands it. Untracked files
+// inside a submodule belong to its own checkout and never to the parent's index.
+fn submodule_inventory(root: &Path, recurse: Option<bool>) -> Option<BTreeSet<PathBuf>> {
+    if !root.join(".gitmodules").is_file() {
+        return None;
+    }
+    let recurse = recurse.unwrap_or_else(|| {
+        std::env::var("CRG_RECURSE_SUBMODULES")
+            .is_ok_and(|s| matches!(s.to_lowercase().as_str(), "true" | "yes" | "1"))
+    });
+    let tracked = if recurse {
+        &["ls-files", "-z", "--recurse-submodules"][..]
+    } else {
+        &["ls-files", "-z"]
+    };
+    let mut entries = BTreeSet::new();
+    for args in [
+        tracked,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+    ] {
+        let (ok, bytes) = crate::git::timed(root, args, "CRG_GIT_TIMEOUT", 30.).ok()?;
+        if !ok {
+            return None;
+        }
+        entries.extend(
+            bytes
+                .split(|&b| b == 0)
+                .filter(|p| !p.is_empty())
+                .filter_map(|p| std::str::from_utf8(p).ok())
+                .map(PathBuf::from),
+        );
+    }
+    Some(entries)
+}
+
 impl Inventory {
     pub(super) fn source_files(root: &Path) -> Result<Vec<String>> {
         Ok(Self::for_index(root, None)?.files)
     }
 
     pub(crate) fn for_index(root: &Path, follow: Option<bool>) -> Result<Self> {
-        Self::scan(root, follow_links(follow), false)
+        Self::for_build(root, follow, None)
+    }
+
+    pub(crate) fn for_build(
+        root: &Path,
+        follow: Option<bool>,
+        recurse_submodules: Option<bool>,
+    ) -> Result<Self> {
+        Self::scan(root, follow_links(follow), false, recurse_submodules)
     }
 
     pub fn discover(root: &Path, follow: bool) -> Result<Self> {
-        Self::scan(root, follow, true)
+        Self::scan(root, follow, true, None)
     }
 
-    fn scan(root: &Path, follow: bool, record_stamps: bool) -> Result<Self> {
+    fn scan(
+        root: &Path,
+        follow: bool,
+        record_stamps: bool,
+        recurse_submodules: Option<bool>,
+    ) -> Result<Self> {
+        let tracked = submodule_inventory(root, recurse_submodules);
         let rules = std::sync::Arc::new(ignores(root)?);
         let mut files = BTreeSet::new();
         let mut followed_files = BTreeSet::new();
@@ -274,7 +323,9 @@ impl Inventory {
                     if !logical.as_os_str().is_empty() {
                         followed += 1;
                     }
-                    let is_source = supported(p);
+                    let is_source = supported(p)
+                        && (!logical.as_os_str().is_empty()
+                            || tracked.as_ref().is_none_or(|files| files.contains(&path)));
                     let control = p.extension().is_some_and(|ext| ext == "csproj")
                         || p.file_name()
                             .is_some_and(|s| s == ".code-review-graphignore" || s == ".gitignore");

@@ -13,7 +13,7 @@ pub(crate) fn absolute_module(
         return None;
     }
     let tail = module.replace('.', "/");
-    let standard = include_str!("../canonical/stdlib-modules.txt")
+    let standard = include_str!("../canonical/imports/stdlib-modules.txt")
         .split_whitespace()
         .any(|s| module.split('.').next() == Some(s));
     for directory in Path::new(from).parent()?.ancestors() {

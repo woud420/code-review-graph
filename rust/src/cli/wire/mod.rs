@@ -10,17 +10,21 @@ pub fn json_text(value: &Value, pretty: bool) -> String {
         serde_json::to_string(value)
     }
     .expect("JSON value");
+    ascii(&raw, !pretty)
+}
+
+pub(in crate::cli) fn ascii(raw: &str, space_after_separators: bool) -> String {
     let mut text = String::with_capacity(raw.len());
     let mut in_string = false;
     let mut escaped = false;
     for ch in raw.chars() {
-        if in_string && !ch.is_ascii() {
+        if in_string && (!ch.is_ascii() || ch == '\u{7f}') {
             for unit in ch.encode_utf16(&mut [0; 2]) {
                 write!(text, "\\u{unit:04x}").expect("String writer");
             }
         } else {
             text.push(ch);
-            if !pretty && !in_string && matches!(ch, ',' | ':') {
+            if space_after_separators && !in_string && matches!(ch, ',' | ':') {
                 text.push(' ');
             }
         }

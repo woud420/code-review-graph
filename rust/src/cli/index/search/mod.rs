@@ -224,7 +224,7 @@ fn keyword(conn: &Connection, query: &str, kind: Option<&str>, limit: i64) -> Re
     Ok(hits)
 }
 
-fn test_file(root: &Path, path: &Path) -> bool {
+pub(in crate::cli) fn test_file(root: &Path, path: &Path) -> bool {
     if TEST_FILENAME.is_match(
         path.file_name()
             .unwrap_or_default()
@@ -260,6 +260,21 @@ fn test_file(root: &Path, path: &Path) -> bool {
     })
 }
 
+pub(in crate::cli) const TEST_INTENT: &[&str] = &[
+    "test", "tests", "tested", "testing", "spec", "specs", "fixture", "fixtures", "mock", "mocks",
+    "stub", "stubs", "coverage",
+];
+
+pub(in crate::cli) fn identifiers(query: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    IDENTIFIERS
+        .iter()
+        .flat_map(|pattern| pattern.find_iter(query))
+        .map(|m| m.as_str().to_lowercase())
+        .filter(|s| s.chars().count() >= 3 && seen.insert(s.clone()))
+        .collect()
+}
+
 struct Boost<'a> {
     query: &'a str,
     lower: String,
@@ -272,19 +287,8 @@ struct Boost<'a> {
 impl<'a> Boost<'a> {
     fn new(query: &'a str, kind: Option<&str>) -> Self {
         let words = words(query);
-        let test_intent = kind == Some("Test")
-            || [
-                "test", "tests", "tested", "testing", "spec", "specs", "fixture", "fixtures",
-                "mock", "mocks", "stub", "stubs", "coverage",
-            ]
-            .iter()
-            .any(|word| words.contains(*word));
-        let identifiers = IDENTIFIERS
-            .iter()
-            .flat_map(|p| p.find_iter(query))
-            .map(|m| m.as_str().to_lowercase())
-            .filter(|s| s.chars().count() >= 3)
-            .collect();
+        let test_intent = kind == Some("Test") || TEST_INTENT.iter().any(|s| words.contains(*s));
+        let identifiers = identifiers(query);
         let lower = query.trim().to_lowercase();
         let json_intent = kind == Some("JsonPath")
             || query.trim_start().starts_with('$')

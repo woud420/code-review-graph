@@ -1,0 +1,12 @@
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!rust/
+!rust/Cargo.toml
+!rust/LICENSE
+!rust/README.md
+!rust/assets/
+!rust/assets/**
+!rust/src/
+!rust/src/**

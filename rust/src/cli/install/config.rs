@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 use toml_edit::{Array, DocumentMut, Table, value};
 
-fn is_ours(entry: &Value, binary: &Path) -> bool {
+pub(super) fn is_ours(entry: &Value, binary: &Path) -> bool {
     let Some(fields) = entry.as_object() else {
         return false;
     };
@@ -22,12 +22,29 @@ fn is_ours(entry: &Value, binary: &Path) -> bool {
     {
         return false;
     }
-    let (Some(command), Some(args)) = (entry["command"].as_str(), entry["args"].as_array()) else {
+    let mut tokens = match &entry["command"] {
+        Value::String(command) => vec![command.as_str()],
+        Value::Array(list) => {
+            let Some(tokens) = list.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+                return false;
+            };
+            tokens
+        }
+        _ => return false,
+    };
+    if let Some(args) = entry.get("args") {
+        let Some(extra) = args
+            .as_array()
+            .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+        else {
+            return false;
+        };
+        tokens.extend(extra);
+    }
+    let Some((&command, rest)) = tokens.split_first() else {
         return false;
     };
-    let Some(mut args) = args.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
-        return false;
-    };
+    let mut args = rest.to_vec();
     if args.len() >= 2 && args[args.len() - 2] == "--repo" {
         args.truncate(args.len() - 2);
     }
@@ -45,45 +62,6 @@ fn is_ours(entry: &Value, binary: &Path) -> bool {
         }
         _ => false,
     }
-}
-
-pub(super) fn json_config(
-    before: &str,
-    root: &Path,
-    binary: &Path,
-    remove: bool,
-) -> Result<String> {
-    let mut doc = if before.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(before)?
-    };
-    let obj = doc.as_object_mut().context("expected a JSON object")?;
-    if remove && !obj.contains_key("mcpServers") {
-        return Ok(before.into());
-    }
-    let servers = obj
-        .entry("mcpServers")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .context("mcpServers must be an object")?;
-    if let Some(previous) = servers.get("code-review-graph") {
-        if !is_ours(previous, binary) {
-            return Ok(before.into());
-        }
-    } else if remove {
-        return Ok(before.into());
-    }
-    if remove {
-        servers.remove("code-review-graph");
-    } else {
-        let desired = json!({"command":binary,"args":["serve"],"cwd":root,"type":"stdio"});
-        if servers.get("code-review-graph") == Some(&desired) {
-            return Ok(before.into());
-        }
-        servers.insert("code-review-graph".into(), desired);
-    }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&doc)?))
 }
 
 pub(super) fn codex_config(

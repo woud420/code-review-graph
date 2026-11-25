@@ -4,7 +4,7 @@ on:
   push:
     branches: [rust-port-proof]
   pull_request:
-    paths: ['rust/**', 'Cargo.*', 'rust-toolchain.toml', 'Makefile', '.github/workflows/rust.yml']
+    paths: ['rust/**', 'Dockerfile', '.dockerignore', 'Cargo.*', 'rust-toolchain.toml', 'Makefile', '.github/workflows/rust.yml']
   workflow_dispatch:
 
 permissions:
@@ -39,6 +39,23 @@ jobs:
           name: code-review-graph-${{ runner.os }}-${{ runner.arch }}
           path: code-review-graph-*.tar.gz
           if-no-files-found: error
+
+  container:
+    name: Standalone container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t crg-native .
+      - name: Exercise the runtime image
+        run: |
+          docker run --rm --entrypoint sh crg-native -ec '
+            if command -v python || command -v python3; then exit 1; fi
+            git init -q
+            printf "fn main() {}\n" > main.rs
+            code-review-graph build --quiet
+            code-review-graph status --json | grep -Eq "\"files\":[[:space:]]*1"
+            crg-daemon --help >/dev/null
+          '
 
   compatibility:
     name: Python replacement gate

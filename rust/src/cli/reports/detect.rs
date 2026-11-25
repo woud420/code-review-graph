@@ -2,6 +2,8 @@ mod details;
 mod mapping;
 mod removed;
 mod render;
+#[cfg(feature = "tokenizer")]
+mod tokens;
 
 use super::review::risk;
 use super::*;
@@ -63,16 +65,20 @@ pub(super) fn analysis(
     conn: &Connection,
     root: &Path,
     files: &[String],
-    base: &str,
+    base: Option<&str>,
     include_churn: bool,
 ) -> Result<Value> {
     let (counts, churn) = mapping::churn(root, include_churn);
     let mut unavailable = String::new();
-    let diff = changes::read_diff(root, base).unwrap_or_else(|e| {
-        unavailable = e.to_string();
-        vec![]
-    });
-    let changes = mapping::run(conn, root, base, files, &diff, &counts)?;
+    let diff = base
+        .map(|base| changes::read_diff(root, base))
+        .transpose()
+        .unwrap_or_else(|e| {
+            unavailable = e.to_string();
+            None
+        })
+        .unwrap_or_default();
+    let changes = mapping::run(conn, root, base.unwrap_or_default(), files, &diff, &counts)?;
     let mut funcs = Vec::new();
     let mut yaml = Vec::new();
     let mut json_paths = Vec::new();
@@ -253,6 +259,60 @@ pub(super) fn analysis(
     )
 }
 
+fn print_panel(
+    root: &Path,
+    files: &[String],
+    result: &Value,
+    baseline: usize,
+    verify: bool,
+) -> Result<()> {
+    if result["changed_functions"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
+    {
+        println!("Token Savings: none to show, as no functions changed.");
+        return Ok(());
+    }
+    #[cfg(feature = "tokenizer")]
+    let verified = verify
+        .then(|| tokens::verify(root, files, result))
+        .transpose()?;
+    #[cfg(not(feature = "tokenizer"))]
+    let verified = {
+        let _ = (root, files);
+        if verify {
+            println!("Note: --verify requires tiktoken. Install with `pip install tiktoken`.");
+        }
+        None
+    };
+    render::panel(result, baseline, verified);
+    Ok(())
+}
+
+pub(in crate::cli) fn update_brief(
+    db: &Path,
+    root: &Path,
+    requested: &str,
+    verify: bool,
+) -> Result<()> {
+    let changed = changes::discover(root, requested).map_err(|e| anyhow::anyhow!("Error: {e}"))?;
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let brief_base = changes::resolve_base(root, requested)?;
+    let _lock = code_review_graph_rs::canonical::lock_for_review(db)?;
+    let conn = crate::cli::store::open(db)?;
+    crate::cli::store::check_root(&conn, db, root)?;
+    let mut impact = analysis(&conn, root, &changed, Some(&brief_base), false)?;
+    let baseline = impact::file_tokens(root, &changed);
+    impact::savings(&mut impact, &conn, root, &changed, "update --brief", "", 0);
+    if let Some(summary) = impact["summary"].as_str().filter(|s| !s.is_empty()) {
+        println!("{summary}");
+    }
+    print_panel(root, &changed, &impact, baseline, verify)?;
+    Ok(())
+}
+
 pub(in crate::cli) fn print(
     conn: &Connection,
     root: &Path,
@@ -288,7 +348,7 @@ pub(in crate::cli) fn print(
         println!("No changes detected.");
         return Ok(());
     }
-    let mut result = analysis(conn, root, &files, &base, churn)?;
+    let mut result = analysis(conn, root, &files, Some(&base), churn)?;
     if let Some(raw) = details {
         let selected = details::parse(raw).map_err(anyhow::Error::msg)?;
         if !selected.is_empty() {
@@ -299,19 +359,7 @@ pub(in crate::cli) fn print(
     impact::savings(&mut result, conn, root, &files, "detect-changes", "", 0);
     if brief {
         render::brief(conn, root, &result)?;
-        if result["changed_functions"]
-            .as_array()
-            .is_none_or(Vec::is_empty)
-        {
-            println!("Token Savings: none to show, as no functions changed.");
-        } else {
-            if verify {
-                println!(
-                    "Note: --verify requires tiktoken. Install with \x60pip install tiktoken\x60."
-                );
-            }
-            render::panel(&result, baseline);
-        }
+        print_panel(root, &files, &result, baseline, verify)?;
     } else {
         println!("{}", crate::cli::wire::json_text(&result, true));
     }
@@ -335,7 +383,7 @@ pub(super) fn run(conn: &Connection, root: &Path, args: &Value, hints: &Hints) -
             json!({"status":"ok","summary":"No changed files detected.","risk_score":0.0,"changed_functions":[],"changed_yaml_paths":[],"changed_json_paths":[],"affected_flows":[],"test_gaps":[],"review_priorities":[]}),
         );
     }
-    let mut out = analysis(conn, root, &files, &base, true)?;
+    let mut out = analysis(conn, root, &files, Some(&base), true)?;
     if args["include_source"] == true {
         let mut left = 600;
         let mut src = HashMap::new();

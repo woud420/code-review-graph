@@ -39,10 +39,11 @@ impl Source {
         &self,
         root: &Path,
         file: &str,
-        callee: &str,
+        call: &crate::model::Call,
         facts: &crate::model::ParsedFile,
         paths: &BTreeSet<String>,
     ) -> Option<(String, String)> {
+        let callee = call.callee.as_str();
         if matches!(self.language, "lua" | "luau")
             && facts.symbols.iter().any(|symbol| {
                 symbol
@@ -55,6 +56,29 @@ impl Source {
                 callee.into(),
                 format!("{}::{callee}", root.join(file).display()),
             ));
+        }
+        if self.language == "rust" {
+            if facts.syntax.site(&call.caller, callee, call.line).is_some()
+                && let Some((_, name)) = callee.rsplit_once('.')
+            {
+                return Some((
+                    name.into(),
+                    format!("{}::{callee}", root.join(file).display()),
+                ));
+            }
+            let (owner, name) = callee.split_once("::")?;
+            if !name.contains("::")
+                && facts
+                    .symbols
+                    .iter()
+                    .any(|s| s.kind == "Class" && s.name == owner)
+            {
+                return Some((
+                    name.into(),
+                    format!("{}::{owner}.{name}", root.join(file).display()),
+                ));
+            }
+            return None;
         }
         if self.language != "python" || !self.extra_edges.direct_name(callee) {
             return None;
@@ -156,25 +180,19 @@ impl Source {
                             .flatten()
                     });
                     if let Some(name) = name {
-                        let doc = (language == "python")
-                            .then(|| super::docs::python(node, source))
-                            .flatten();
+                        let doc = match language {
+                            "python" => super::docs::python(node, source),
+                            "rust" => crate::parser::rust::doc(node, source),
+                            _ => None,
+                        };
                         let is_async = node.child(0).is_some_and(|n| n.kind() == "async");
-                        let mut decorators = Vec::new();
-                        if language == "rust" {
-                            for attr in std::iter::successors(node.prev_named_sibling(), |n| {
-                                n.prev_named_sibling()
-                            })
-                            .take_while(|n| n.kind() == "attribute_item")
-                            {
-                                if let Some(value) =
-                                    attr.named_child(0).and_then(|n| n.named_child(0))
-                                {
-                                    decorators.push(text(value, source).to_owned());
-                                }
-                            }
-                            decorators.reverse();
-                        }
+                        let decorators: Vec<_> = if language == "rust" {
+                            crate::parser::rust::attributes(node, source)
+                                .map(str::to_owned)
+                                .collect()
+                        } else {
+                            vec![]
+                        };
                         result.declarations.insert(
                             (line, name.to_owned()),
                             Declaration {
@@ -197,7 +215,7 @@ impl Source {
                 }
                 "use_declaration" => {
                     if let Some(arg) = node.child_by_field_name("argument") {
-                        rust_use_paths(arg, source, "", line, &mut result.imports);
+                        rust_use_paths(arg, source, line, &mut result.imports);
                     }
                 }
                 "import_from_statement" => {
@@ -232,57 +250,10 @@ impl Source {
     }
 }
 
-fn rust_use_paths(
-    node: Node<'_>,
-    source: &str,
-    prefix: &str,
-    line: usize,
-    out: &mut BTreeSet<(usize, String)>,
-) {
-    let join = |name: &str| {
-        if prefix.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{prefix}::{name}")
-        }
-    };
-    let path = match node.kind() {
-        "self" if !prefix.is_empty() => prefix.to_owned(),
-        "identifier" | "type_identifier" | "scoped_identifier" | "scoped_type_identifier" => {
-            join(text(node, source))
-        }
-        "use_as_clause" => {
-            if let Some(path) = node.child_by_field_name("path") {
-                rust_use_paths(path, source, prefix, line, out);
-            }
-            return;
-        }
-        "scoped_use_list" => {
-            if let (Some(path), Some(list)) = (
-                field(node, "path", source),
-                node.child_by_field_name("list"),
-            ) {
-                rust_use_paths(list, source, &join(path), line, out);
-            }
-            return;
-        }
-        "use_list" => {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                rust_use_paths(child, source, prefix, line, out);
-            }
-            return;
-        }
-        "use_wildcard" => {
-            if let Some(path) = field(node, "path", source) {
-                join(path)
-            } else if !prefix.is_empty() {
-                prefix.to_owned()
-            } else {
-                return;
-            }
-        }
-        _ => return,
-    };
-    out.insert((line, path));
+fn rust_use_paths(node: Node<'_>, source: &str, line: usize, out: &mut BTreeSet<(usize, String)>) {
+    out.extend(
+        super::imports::rust::bindings(node, source)
+            .into_iter()
+            .map(|(_, path)| (line, path)),
+    );
 }

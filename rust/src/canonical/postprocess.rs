@@ -5,6 +5,7 @@ pub use flows::{RemovedFlowNode, conventional_entry, removed_flow_scores};
 mod fts;
 mod java;
 mod patterns;
+mod rust;
 
 use anyhow::Result;
 use rusqlite::{Transaction, params};
@@ -209,6 +210,16 @@ fn resolve_bare(tx: &Transaction<'_>, nodes: &[Node]) -> Result<usize> {
                                     _ => php_own_method.is_none_or(|owner| n.qn != owner.qn),
                                 }
                             }
+                            None if file.ends_with(".rs") => {
+                                let unknown = extra["receiver"].as_str().is_some_and(|r| {
+                                    !r.is_empty()
+                                        && !matches!(
+                                            r,
+                                            "self" | "this" | "$this" | "super" | "base"
+                                        )
+                                }) && extra.get("receiver_type").is_none();
+                                !unknown || n.parent.is_none()
+                            }
                             None => {
                                 file.ends_with(".go")
                                     || (n.language == "sql" && n.file == file)
@@ -268,6 +279,7 @@ struct Stages {
 fn compute(tx: &Transaction<'_>, stages: Stages, full: bool) -> Result<Report> {
     let mut report = Report::default();
     java::resolve_framework_calls(tx)?;
+    rust::resolve(tx)?;
     let entities = if !stages.resolve {
         Vec::new()
     } else {
@@ -318,6 +330,14 @@ fn compute(tx: &Transaction<'_>, stages: Stages, full: bool) -> Result<Report> {
         }
     }
     Ok(report)
+}
+
+pub fn refresh_flows(tx: &Transaction<'_>) -> Result<usize> {
+    flows::store(tx, &nodes(tx)?, &edges(tx)?)
+}
+
+pub fn refresh_communities(tx: &Transaction<'_>) -> Result<usize> {
+    communities::store(tx, &nodes(tx)?, &edges(tx)?)
 }
 
 pub struct StandaloneReport {

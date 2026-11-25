@@ -10,13 +10,36 @@ pub(super) fn direct_target(fun: Node<'_>, source: &str, class: &str) -> Option<
         "identifier" => Some(source[fun.byte_range()].to_owned()),
         "generic_function" => direct_target(fun.child_by_field_name("function")?, source, class),
         "scoped_identifier" => {
-            let scope = field(fun, "path", source)?;
-            let name = field(fun, "name", source)?;
-            Some(if scope == "Self" {
-                format!("{class}.{name}")
+            fn segments(node: Node<'_>, source: &str, out: &mut Vec<String>) {
+                match node.kind() {
+                    "generic_type" | "generic_function" => {
+                        if let Some(inner) = node
+                            .child_by_field_name("type")
+                            .or_else(|| node.child_by_field_name("function"))
+                        {
+                            segments(inner, source, out);
+                        }
+                    }
+                    "scoped_identifier" | "scoped_type_identifier" => {
+                        for key in ["path", "name"] {
+                            if let Some(inner) = node.child_by_field_name(key) {
+                                segments(inner, source, out);
+                            }
+                        }
+                    }
+                    "identifier" | "type_identifier" | "crate" | "self" | "super" => {
+                        out.push(text(node, source).to_owned())
+                    }
+                    _ => {}
+                }
+            }
+            let mut path = Vec::new();
+            segments(fun, source, &mut path);
+            if path.len() == 2 && path[0] == "Self" && !class.is_empty() {
+                Some(format!("{class}.{}", path[1]))
             } else {
-                format!("{scope}::{name}")
-            })
+                (!path.is_empty()).then(|| path.join("::"))
+            }
         }
         "attribute" | "field_expression" => {
             let receiver = field(fun, "object", source).or_else(|| field(fun, "value", source))?;

@@ -150,7 +150,7 @@ pub(super) fn run(conn: &Connection, root: &Path, args: &Value) -> Result<Value>
     match files.and_then(|files| Ok((files, changes::resolve_base(root, base)?))) {
         Err(e) => summary.push(format!("Degraded: {e}")),
         Ok((files, base)) if !files.is_empty() => {
-            if let Ok(report) = super::detect::analysis(conn, root, &files, &base, true) {
+            if let Ok(report) = super::detect::analysis(conn, root, &files, Some(&base), true) {
                 let score = report["risk_score"].as_f64().unwrap_or_default();
                 risk = if score > 0.7 {
                     "high"

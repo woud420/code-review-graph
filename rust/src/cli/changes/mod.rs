@@ -1,68 +1,11 @@
-use anyhow::{Context, Result, bail};
-use std::{
-    collections::HashSet,
-    io::Read,
-    path::Path,
-    process::{Command, Stdio},
-    time::{Duration, Instant},
-};
+use anyhow::Result;
+use std::path::Path;
 
 pub(super) fn git(root: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
     git_timed(root, args, "CRG_DISCOVERY_TIMEOUT", 3.)
 }
 
-pub(super) fn git_timed(
-    root: &Path,
-    args: &[&str],
-    setting: &str,
-    default: f64,
-) -> Result<(bool, Vec<u8>)> {
-    let configured = |key| {
-        std::env::var(key)
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|s| s.is_finite() && *s >= 0.)
-    };
-    let (seconds, knob) = if setting == "CRG_DISCOVERY_TIMEOUT"
-        && configured(setting).is_none()
-        && configured("CRG_GIT_TIMEOUT").is_some()
-    {
-        (
-            configured("CRG_GIT_TIMEOUT").unwrap_or(default),
-            "CRG_GIT_TIMEOUT",
-        )
-    } else {
-        (configured(setting).unwrap_or(default), setting)
-    };
-    if seconds == 0. {
-        bail!(
-            "could not determine the changes: git timed out after 0s. Raise {knob}, or re-run when the repository is not busy."
-        );
-    }
-    let mut child=Command::new("git").current_dir(root).args(args).stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().context("could not determine the changes: git could not be run. Install git and make sure it is on PATH.")?;
-    let mut stdout = child.stdout.take().context("git output unavailable")?;
-    let read = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let start = Instant::now();
-    loop {
-        if let Some(exit) = child.try_wait()? {
-            let bytes = read
-                .join()
-                .map_err(|_| anyhow::anyhow!("git output unavailable"))??;
-            return Ok((exit.success(), bytes));
-        }
-        if start.elapsed().as_secs_f64() >= seconds {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!(
-                "could not determine the changes: git timed out after {seconds}s. Raise {knob}, or re-run when the repository is not busy."
-            );
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+pub(super) use code_review_graph_rs::git::timed as git_timed;
 fn scalar(root: &Path, args: &[&str]) -> Result<String> {
     let (ok, bytes) = git(root, args)?;
     Ok(if ok {
@@ -129,73 +72,11 @@ pub(super) fn resolve_base(root: &Path, base: &str) -> Result<String> {
 
 pub(super) fn discover(root: &Path, base: &str) -> Result<Vec<String>> {
     let resolved = resolve_base(root, base)?;
-    let mut paths = Vec::new();
-    let (ok, bytes) = git(
+    code_review_graph_rs::git::changed_paths(
         root,
-        &[
-            "diff",
-            "--relative",
-            "--name-status",
-            "-z",
-            &resolved,
-            "--",
-            ".",
-        ],
-    )?;
-    if ok {
-        let mut fields = bytes.split(|&b| b == 0).filter(|b| !b.is_empty());
-        while let Some(status) = fields.next() {
-            let count = if matches!(status.first(), Some(b'R' | b'C')) {
-                2
-            } else {
-                1
-            };
-            for v in fields.by_ref().take(count) {
-                if let Ok(p) = std::str::from_utf8(v) {
-                    paths.push(p.to_owned());
-                }
-            }
-        }
-        let (_, unknown) = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-        paths.extend(
-            unknown
-                .split(|&b| b == 0)
-                .filter(|v| !v.is_empty())
-                .filter_map(|b| std::str::from_utf8(b).ok().map(str::to_owned)),
-        );
-    }
-    if paths.is_empty() {
-        let (ok, status) = git(
-            root,
-            &[
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--",
-                ".",
-            ],
-        )?;
-        if !ok {
-            return Ok(Vec::new());
-        }
-        let prefix = scalar(root, &["rev-parse", "--show-prefix"])?;
-        let mut fields = status.split(|&b| b == 0);
-        while let Some(row) = fields.next() {
-            if row.len() <= 3 {
-                continue;
-            }
-            if let Ok(name) = std::str::from_utf8(&row[3..]) {
-                paths.push(name.strip_prefix(&prefix).unwrap_or(name).to_owned());
-            }
-            if row[..2].iter().any(|b| matches!(b, b'R' | b'C')) {
-                fields.next();
-            }
-        }
-    }
-    let mut seen = HashSet::new();
-    paths.retain(|p| seen.insert(p.clone()));
-    Ok(paths)
+        &resolved,
+        code_review_graph_rs::git::Scope::Review,
+    )
 }
 
 pub(super) fn paths(root: &Path, args: &serde_json::Value) -> Result<Vec<String>> {

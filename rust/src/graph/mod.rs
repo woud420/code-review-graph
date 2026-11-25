@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 const APPLICATION_ID: i64 = 0x43524752; // "CRGR", distinct from the Python database.
-const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 const CALL_SITES: &str = "CREATE TABLE call_sites (
     source_file TEXT NOT NULL, source TEXT NOT NULL, raw_target TEXT NOT NULL,
     target_file TEXT NOT NULL, target TEXT NOT NULL, line INTEGER NOT NULL,
@@ -730,6 +730,20 @@ impl Resolver {
                 .target
                 .as_ref()
                 .map(|target| (file.into(), target.clone()));
+        }
+        if file.ends_with(".rs") && !name.contains(['.', ':']) {
+            return self.resolve_binding(file, name, line).or_else(|| {
+                // Only bare calls left after checking local and imported names use the first matching method.
+                self.modules[file]
+                    .facts
+                    .symbols
+                    .iter()
+                    .find(|s| {
+                        matches!(s.kind.as_str(), "Function" | "Test" | "Class" | "Type")
+                            && s.name.rsplit('.').next() == Some(name)
+                    })
+                    .map(|s| (file.to_owned(), s.name.clone()))
+            });
         }
         if let Some(site) = self.modules[file].facts.cfamily.site(caller, name, line) {
             return site.target.as_ref().map(|n| (file.into(), n.clone()));

@@ -157,6 +157,17 @@ def main():
             assert a == b and a["exit"] == code, (flags, a, b)
             assert not any(data.glob("graph.html")) and not any(data.glob("graph.svg")), flags
         print(f"{len(checks)} empty/invalid requests and optional dependencies match")
+        # A malformed value in a disconnected legacy row must never be decoded by
+        # a local seed. A whole-graph SELECT * would fail to read this integer.
+        with sqlite3.connect(data / "graph.db") as db:
+            assert db.execute("UPDATE nodes SET line_start='unreadable' WHERE name='location' OR file_path LIKE '%/config.json'").rowcount > 0
+        nearby = []
+        for cmd, opts in ((python, pyenv), (native, env)):
+            result = run([*cmd, "visualize", "--seed-symbol", "read", "--depth", "0", "--sidecar"], repo, opts)
+            assert result["exit"] == 0, result
+            nearby.append((result, (data/"graph.data.js").read_bytes()))
+        assert nearby[0] == nearby[1]
+        print("Seeded reads skip disconnected row payloads and preserve whole-graph totals")
         if args.serve:
             from visualize_serve import compare
             compare(repo, data, python, native, pyenv, env)

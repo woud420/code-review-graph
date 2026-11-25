@@ -200,7 +200,7 @@ impl<'a> Seeds<'a> {
             directed: true,
             error: String::new(),
         };
-        if let (Some(start), Some(end)) = (&opt.path_from, &opt.path_to) {
+        if let Some((start, end)) = opt.path_query() {
             let (from, to) = (symbol(nodes, start)?[0], symbol(nodes, end)?[0]);
             result.kind = "path";
             result.path = shortest(&adjacent(edges, true, true), from, to);
@@ -246,6 +246,15 @@ impl<'a> Seeds<'a> {
         result.nodes.retain(|n| seen.insert(*n));
         Ok(result)
     }
+}
+
+pub(super) fn seed_names<'a>(
+    nodes: &'a [Value],
+    flows: &[Value],
+    options: &Options,
+    patterns: &[String],
+) -> Result<Vec<&'a str>> {
+    Ok(Seeds::resolve(nodes, &[], flows, options, patterns)?.nodes)
 }
 
 fn distances<'a>(

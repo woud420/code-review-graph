@@ -6,7 +6,7 @@ use std::fs;
 
 #[test]
 fn upgrade_rebuilds_matching_hashes_and_retries_after_a_parse_failure() -> Result<()> {
-    for legacy_cache in [1, 2] {
+    for (index_version, legacy_cache) in [("1", 1), ("1", 2), ("2", 3)] {
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
         let db = root.join(".code-review-graph/graph.db");
@@ -17,8 +17,8 @@ fn upgrade_rebuilds_matching_hashes_and_retries_after_a_parse_failure() -> Resul
         index(&root, &db, true, Level::Full, false)?;
         let canonical = Connection::open(&db)?;
         canonical.execute(
-            "UPDATE metadata SET value='1' WHERE key='rust_index_version'",
-            [],
+            "UPDATE metadata SET value=? WHERE key='rust_index_version'",
+            [index_version],
         )?;
         canonical.execute("DELETE FROM edges WHERE kind='CALLS'", [])?;
         let private = Connection::open(&cache)?;
@@ -32,7 +32,7 @@ fn upgrade_rebuilds_matching_hashes_and_retries_after_a_parse_failure() -> Resul
         assert!(index(&root, &db, false, Level::Full, false).is_err());
         assert_eq!(
             crate::canonical::metadata(&canonical, "rust_index_version")?.as_deref(),
-            Some("1")
+            Some(index_version)
         );
         assert_eq!(
             private.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
@@ -47,7 +47,7 @@ fn upgrade_rebuilds_matching_hashes_and_retries_after_a_parse_failure() -> Resul
         );
         assert_eq!(
             private.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-            3
+            crate::graph::SCHEMA_VERSION
         );
         assert_eq!(
             Graph::open_existing(&cache)?.callees("example.py::main")?[0].name,
@@ -66,5 +66,31 @@ fn upgrade_rebuilds_matching_hashes_and_retries_after_a_parse_failure() -> Resul
             0
         );
     }
+    Ok(())
+}
+
+#[test]
+fn proof_index_recovers_old_parser_facts_on_incremental_update() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let db = root.join("cache.sqlite");
+    fs::write(
+        root.join("example.py"),
+        "def target(): pass\ndef outer(): target()\n",
+    )?;
+    let mut graph = Graph::open(&db)?;
+    graph.sync(&root, true)?;
+    let old = Connection::open(&db)?;
+    old.execute("DELETE FROM calls", [])?;
+    old.execute("UPDATE files SET facts='{}'", [])?;
+    old.pragma_update(None, "user_version", 3)?;
+    assert!(graph.callees("example.py::outer")?.is_empty());
+    assert_eq!(graph.sync(&root, false)?.files_parsed, 1);
+    assert_eq!(graph.callees("example.py::outer")?[0].name, "target");
+    assert_eq!(
+        old.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+        crate::graph::SCHEMA_VERSION
+    );
+    assert_eq!(graph.sync(&root, false)?.files_parsed, 0);
     Ok(())
 }

@@ -41,6 +41,29 @@ pub(super) fn read(base: &Path, relative: &Path) -> Result<Option<String>> {
 pub(super) struct Plan(pub Vec<Change>);
 
 impl Plan {
+    pub fn current(&self, base: &Path, file: &str) -> Result<Option<String>> {
+        let path = base.join(file);
+        if let Some(change) = self.0.iter().find(|change| change.path == path) {
+            return Ok(change.after.clone());
+        }
+        read(base, Path::new(file))
+    }
+    pub fn backup(&mut self, base: &Path, file: &str, text: &str) -> Result<()> {
+        let backup = format!("{file}.bak");
+        if self.current(base, &backup)?.is_some() {
+            return Ok(());
+        }
+        self.edit(base, &backup, backup.clone(), false, |_| Ok(text.into()))?;
+        #[cfg(unix)]
+        if let Some(change) = self.0.iter_mut().find(|c| c.path == base.join(&backup))
+            && let Ok(meta) = base.join(file).symlink_metadata()
+        {
+            use std::os::unix::fs::PermissionsExt;
+            change.mode = Some(meta.permissions().mode() & 0o777);
+        }
+        Ok(())
+    }
+
     pub fn edit(
         &mut self,
         base: &Path,
@@ -62,7 +85,13 @@ impl Plan {
         }
         let before = read(base, Path::new(relative))?;
         let after = render(before.as_deref().unwrap_or(""))?;
-        if before.as_deref().unwrap_or("") != after {
+        let mut needs_mode = false;
+        #[cfg(unix)]
+        if executable && let Ok(meta) = fs::metadata(&path) {
+            use std::os::unix::fs::PermissionsExt;
+            needs_mode = meta.permissions().mode() & 0o777 != 0o755;
+        }
+        if before.as_deref().unwrap_or("") != after || needs_mode {
             self.0.push(Change {
                 prior_permissions: fs::metadata(&path).ok().map(|m| m.permissions()),
                 path,
@@ -184,7 +213,13 @@ impl Plan {
 fn replace(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
     let parent = path.parent().context("missing install directory")?;
     fs::create_dir_all(parent)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    if !path.exists() && mode.is_none() {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut tmp = builder.tempfile_in(parent)?;
     tmp.write_all(bytes)?;
     #[cfg(unix)]
     {

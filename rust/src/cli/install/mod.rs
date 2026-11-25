@@ -1,6 +1,11 @@
+mod client_assets;
 mod config;
 mod ignore_block;
+mod jsonc;
 mod plan;
+mod platforms;
+mod registration;
+pub(super) mod uninstall;
 use super::changes;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -24,7 +29,7 @@ macro_rules! asset {
 pub(super) struct Options {
     #[arg(long)]
     pub repo: Option<PathBuf>,
-    #[arg(long,default_value="all",value_parser=["all","claude","claude-code","codex"])]
+    #[arg(long,default_value="all",value_parser=["all","codex","claude","claude-code","cursor","windsurf","zed","continue","opencode","mimo","antigravity","gemini-cli","qwen","kiro","qoder","copilot","copilot-cli","hermes","dsh","codebuddy"])]
     platform: String,
     #[arg(long)]
     dry_run: bool,
@@ -72,21 +77,6 @@ fn confirmed(prompt: &str, default: bool) -> Result<bool> {
     })
 }
 
-fn platform_root(opts: &Options, root: &Path, codex: &Path) -> (bool, bool) {
-    let auto = opts.platform == "all";
-    let executable = |name| {
-        env::split_paths(&env::var_os("PATH").unwrap_or_default()).any(|d| d.join(name).is_file())
-    };
-    let claude = matches!(opts.platform.as_str(), "claude" | "claude-code")
-        || (auto
-            && (root.join(".claude").is_dir()
-                || env::home_dir().is_some_and(|h| h.join(".claude").is_dir())
-                || executable("claude")));
-    let use_codex = opts.platform == "codex"
-        || (auto && (codex.is_dir() || env::var_os("CODEX_HOME").is_some() || executable("codex")));
-    (claude, use_codex)
-}
-
 fn managed_file(plan: &mut Plan, base: &Path, path: &str, shown: String, body: &str) -> Result<()> {
     plan.edit(base, path, shown, false, |old| {
         ensure!(
@@ -102,9 +92,23 @@ fn instruction(plan: &mut Plan, root: &Path, path: &str, section: &str) -> Resul
     let marker = "<!-- code-review-graph MCP tools -->";
     plan.edit(root, path, path.into(), false, |before| {
         if before.contains(marker) {
-            return Ok(before.into());
+            let mut stale = uninstall::catalog("instructions")
+                .filter(|known| *known != section && before.contains(known));
+            let Some(anchor) = stale.next() else {
+                return Ok(before.into());
+            };
+            let (left, right) = before.split_once(anchor).unwrap();
+            let (mut left, mut right) = (left.to_owned(), right.to_owned());
+            for old in stale {
+                left = left.replace(old, "");
+                right = right.replace(old, "");
+            }
+            if left.contains(section) || right.contains(section) {
+                return Ok(left + &right);
+            }
+            return Ok(left + section + &right);
         }
-        let prefix = if before.is_empty() || before.ends_with("\n\n") {
+        let prefix = if before.is_empty() {
             ""
         } else if before.ends_with('\n') {
             "\n"
@@ -185,30 +189,44 @@ pub(super) fn run(opts: Options) -> Result<()> {
     ensure!(root.is_dir(), "repository directory does not exist");
     let binary = env::current_exe()?;
     let codex = codex_home()?;
-    let (claude, use_codex) = platform_root(&opts, &root, &codex);
+    let home = env::home_dir().context("missing home")?;
+    let target = if opts.platform == "claude-code" {
+        "claude"
+    } else {
+        &opts.platform
+    };
+    let clients: Vec<_> = platforms::CLIENTS
+        .into_iter()
+        .filter(|(name, _)| {
+            name == &target || (target == "all" && platforms::detected(name, &home, &root))
+        })
+        .collect();
+    let claude = clients.iter().any(|(name, _)| *name == "claude");
+    let use_codex = clients.iter().any(|(name, _)| *name == "codex");
     let mut plan = Plan::default();
-    let mut configured = vec![];
+    let mut configured = Vec::new();
     println!("Installing MCP server config...");
-    if claude {
-        plan.edit(&root, ".mcp.json", ".mcp.json".into(), false, |s| {
-            config::json_config(s, &root, &binary, false)
-        })?;
-        configured.push("Claude Code");
-        if opts.dry_run {
-            println!("  [dry-run] Claude Code: would write .mcp.json");
+    let mut paths = platforms::paths(&root, true);
+    paths.extend(platforms::paths(&home, false));
+    for (client, label) in &clients {
+        if *client == "codebuddy" && claude {
+            continue;
         }
-    }
-    if use_codex {
-        plan.edit(
-            &codex,
-            "config.toml",
-            "~/.codex/config.toml".into(),
-            false,
-            |s| config::codex_config(s, &root, &binary, false),
-        )?;
-        configured.push("Codex");
-        if opts.dry_run {
-            println!("  [dry-run] Codex: would write ~/.codex/config.toml");
+        if let Some(binding) = platforms::installation(&paths, client)
+            && registration::bind(
+                &mut plan,
+                binding,
+                &root,
+                &home,
+                &binary,
+                label,
+                opts.dry_run,
+            )?
+        {
+            configured.push(*label);
+            if *client == "claude" && clients.iter().any(|(p, _)| *p == "codebuddy") {
+                configured.push("CodeBuddy Code");
+            }
         }
     }
     if configured.is_empty() {
@@ -237,25 +255,8 @@ pub(super) fn run(opts: Options) -> Result<()> {
             "{before}{prefix}# Added by code-review-graph\n.code-review-graph/\n"
         ))
     })?;
-    if !opts.no_skills && claude {
-        for (n, body) in [
-            (
-                "explore-codebase",
-                asset!("claude/skills/explore-codebase/SKILL.md"),
-            ),
-            (
-                "review-changes",
-                asset!("claude/skills/review-changes/SKILL.md"),
-            ),
-            ("debug-issue", asset!("claude/skills/debug-issue/SKILL.md")),
-            (
-                "refactor-safely",
-                asset!("claude/skills/refactor-safely/SKILL.md"),
-            ),
-        ] {
-            let path = format!(".claude/skills/{n}/SKILL.md");
-            managed_file(&mut plan, &root, &path, path.clone(), body)?;
-        }
+    if !opts.no_skills {
+        client_assets::skills(&mut plan, &root, &home, &clients)?;
     }
     if !opts.no_skills && use_codex {
         let skill = codex.join("skills/code-review-graph");
@@ -316,24 +317,29 @@ pub(super) fn run(opts: Options) -> Result<()> {
     }
     if !opts.no_hooks {
         if claude {
-            plan.edit(
+            client_assets::hook_settings(
+                &mut plan,
                 &root,
                 ".claude/settings.json",
-                ".claude/settings.json".into(),
+                asset!("claude/settings.json"),
+                &binary,
                 false,
-                |s| config::hooks(s, asset!("claude/settings.json"), &binary),
             )?;
         }
         if use_codex {
-            plan.edit(
+            client_assets::hook_settings(
+                &mut plan,
                 &codex,
                 "hooks.json",
-                "~/.codex/hooks.json".into(),
+                asset!("codex/hooks.json"),
+                &binary,
                 false,
-                |s| config::hooks(s, asset!("codex/hooks.json"), &binary),
             )?;
         }
-        git_hooks(&mut plan, &root, &binary)?;
+        client_assets::hooks(&mut plan, &root, &home, &binary, &clients)?;
+        if matches!(target, "all" | "claude" | "qoder" | "codex") {
+            git_hooks(&mut plan, &root, &binary)?;
+        }
     }
     if opts.steering || opts.no_steering {
         let prefix = if opts.dry_run { "[dry-run] " } else { "" };
@@ -385,22 +391,21 @@ pub(super) fn run(opts: Options) -> Result<()> {
             || opts.yes
             || confirmed("Inject graph instructions into the repository?", true)?)
     {
-        if claude {
-            instruction(&mut plan, &root, "CLAUDE.md", asset!("claude/CLAUDE.md"))?;
-        }
-        if use_codex {
-            instruction(&mut plan, &root, "AGENTS.md", asset!("codex/AGENTS.md"))?;
-        }
+        client_assets::instructions(&mut plan, &root, &clients)?;
     }
     let new: BTreeSet<_> = plan
         .0
         .iter()
-        .filter(|c| c.before.is_none())
+        .filter(|c| c.after.is_some())
         .filter_map(|c| c.path.strip_prefix(&root).ok())
-        .filter(|p| !p.starts_with(".git"))
+        .filter(|p| !p.starts_with(".git") && !p.starts_with(".code-review-graph"))
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     if !new.is_empty() {
+        if !root.join(".code-review-graph").exists() {
+            let ignore = ".code-review-graph/.gitignore";
+            plan.edit(&root,ignore,ignore.into(),false,|_| Ok("# Auto-generated by code-review-graph — do not commit database files.\n# The graph.db contains absolute paths and code structure metadata.\n*\n".into()))?;
+        }
         let path = ".code-review-graph/install-manifest.json";
         plan.edit(&root, path, path.into(), false, |s| {
             let mut files = new;
@@ -437,60 +442,6 @@ pub(super) fn run(opts: Options) -> Result<()> {
         for change in &plan.0 {
             println!("  {}", change.shown);
         }
-    }
-    Ok(())
-}
-
-#[derive(Args)]
-pub(super) struct Uninstall {
-    #[arg(long)]
-    repo: Option<PathBuf>,
-    #[arg(long,required=true,value_parser=["claude","claude-code","codex"])]
-    platform: String,
-    #[arg(long)]
-    dry_run: bool,
-    #[arg(short = 'y', long)]
-    yes: bool,
-}
-
-pub(super) fn unbind(opts: Uninstall) -> Result<()> {
-    let root = super::root(opts.repo.as_deref(), false)?;
-    let bin = env::current_exe()?;
-    let mut plan = Plan::default();
-    let codex = opts.platform == "codex";
-    let label = if codex { "codex" } else { "claude" };
-    if codex {
-        let home = codex_home()?;
-        plan.edit(
-            &home,
-            "config.toml",
-            "~/.codex/config.toml".into(),
-            false,
-            |s| config::codex_config(s, &root, &bin, true),
-        )?;
-    } else {
-        plan.edit(&root, ".mcp.json", ".mcp.json".into(), false, |s| {
-            config::json_config(s, &root, &bin, true)
-        })?;
-    }
-    println!("code-review-graph unbind ({label}) — planned actions:");
-    if plan.0.is_empty() {
-        println!("  (nothing to do — {label} has no code-review-graph MCP registration)");
-        return Ok(());
-    }
-    for c in &plan.0 {
-        println!("  edit    {} (remove code-review-graph MCP entry)", c.shown);
-    }
-    if opts.dry_run {
-        println!("\n[dry-run] No changes made.");
-    } else if opts.yes || confirmed("Proceed with unbind?", false)? {
-        plan.apply()?;
-        println!(
-            "Done. Removed 0 path(s); edited {} shared file(s).",
-            plan.0.len()
-        );
-    } else {
-        println!("Aborted.");
     }
     Ok(())
 }

@@ -1,0 +1,390 @@
+[
+  {
+    "name": "code-review-graph",
+    "url": "https://github.com/tirth8205/code-review-graph",
+    "commit": "84bde35459c52e1e0c4b25c6c4799743021e0fc7",
+    "language": "python",
+    "size_category": "medium",
+    "test_commits": [
+      {
+        "sha": "528801f841e519567ef54d6e52e9b9831d162e1b",
+        "description": "feat: add multi-platform MCP server installation support",
+        "changed_files": 3
+      },
+      {
+        "sha": "84bde35459c52e1e0c4b25c6c4799743021e0fc7",
+        "description": "feat: add Google Antigravity platform support for MCP install",
+        "changed_files": 2
+      }
+    ],
+    "entry_points": [
+      "code_review_graph/cli.py::cli",
+      "code_review_graph/main.py::main"
+    ],
+    "search_queries": [
+      {
+        "query": "GraphStore nodes",
+        "expected": "code_review_graph/graph.py::GraphStore"
+      },
+      {
+        "query": "parse AST",
+        "expected": "code_review_graph/parser.py::CodeParser"
+      },
+      {
+        "query": "full build",
+        "expected": "code_review_graph/incremental.py::full_build"
+      }
+    ],
+    "multi_hop_tasks": [
+      {
+        "id": "crg-parse-file-callers",
+        "nl_query": "Who invokes the parser entry point on a single source file",
+        "anchor_qualified_suffix": "code_review_graph/parser.py::codeparser.parse_file",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "setup_method"
+        ],
+        "k": 10
+      },
+      {
+        "id": "crg-upsert-node-callers",
+        "nl_query": "Where the graph store inserts or updates a node",
+        "anchor_qualified_suffix": "code_review_graph/graph.py::graphstore.upsert_node",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "store_file_nodes_edges"
+        ],
+        "k": 10
+      }
+    ],
+    "agent_questions": [
+      "How does GraphStore upsert_node store a node",
+      "Where does full_build parse the repository",
+      "How does hybrid_search rank search results"
+    ]
+  },
+  {
+    "name": "express",
+    "url": "https://github.com/expressjs/express",
+    "commit": "b4ab7d65d7724d9309b6faaaf82ad492da2a6d35",
+    "language": "javascript",
+    "size_category": "small",
+    "test_commits": [
+      {
+        "sha": "925a1dff1e42f1b393c977b8b77757fcf633e09f",
+        "description": "fix: bump qs minimum to ^6.14.2 for CVE-2026-2391",
+        "changed_files": 1
+      },
+      {
+        "sha": "b4ab7d65d7724d9309b6faaaf82ad492da2a6d35",
+        "description": "test: include edge case tests for res.type()",
+        "changed_files": 1
+      }
+    ],
+    "entry_points": [
+      "lib/application.js::app.handle",
+      "lib/express.js::createApplication"
+    ],
+    "search_queries": [
+      {
+        "query": "app handle",
+        "expected": "lib/application.js::app"
+      },
+      {
+        "query": "response send",
+        "expected": "lib/response.js::res"
+      },
+      {
+        "query": "request",
+        "expected": "lib/request.js::req"
+      }
+    ],
+    "multi_hop_tasks": [
+      {
+        "id": "express-create-application-callees",
+        "nl_query": "What express does when constructing an application",
+        "anchor_qualified_suffix": "lib/express.js::createapplication",
+        "traversal_pattern": "callees_of",
+        "expected_neighbor_names": [
+          "mixin",
+          "create",
+          "init"
+        ],
+        "k": 10
+      }
+    ],
+    "agent_questions": [
+      "How does app.handle process the middleware stack",
+      "Where does res.send write the response body",
+      "How does createApplication initialize an app"
+    ]
+  },
+  {
+    "name": "fastapi",
+    "url": "https://github.com/tiangolo/fastapi",
+    "commit": "22381558446c5d1ac376680a6581dd63b3a04119",
+    "language": "python",
+    "size_category": "medium",
+    "test_commits": [
+      {
+        "sha": "749cefdeb1428ba5c3911b03c4a72993f7eb3747",
+        "description": "Add streaming JSON Lines and binary yield support (#15022)",
+        "changed_files": 21
+      },
+      {
+        "sha": "22381558446c5d1ac376680a6581dd63b3a04119",
+        "description": "Add Server-Sent Events support (#15030)",
+        "changed_files": 23
+      }
+    ],
+    "entry_points": [
+      "fastapi/applications.py::FastAPI",
+      "fastapi/routing.py::APIRouter"
+    ],
+    "search_queries": [
+      {
+        "query": "FastAPI application",
+        "expected": "fastapi/applications.py::FastAPI"
+      },
+      {
+        "query": "APIRoute routing",
+        "expected": "fastapi/routing.py::APIRoute"
+      },
+      {
+        "query": "Depends injection",
+        "expected": "fastapi/params.py::Depends"
+      }
+    ],
+    "multi_hop_tasks": [
+      {
+        "id": "fastapi-route-handler-callers",
+        "nl_query": "How fastapi binds a route handler to an APIRoute",
+        "anchor_qualified_suffix": "fastapi/routing.py::apiroute.get_route_handler",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "__init__"
+        ],
+        "k": 10
+      },
+      {
+        "id": "fastapi-get-dependant-callers",
+        "nl_query": "Where fastapi resolves dependency declarations into a tree",
+        "anchor_qualified_suffix": "fastapi/dependencies/utils.py::get_dependant",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "get_parameterless_sub_dependant",
+          "solve_dependencies"
+        ],
+        "k": 10
+      }
+    ],
+    "agent_questions": [
+      "How does include_router register routes on the application",
+      "Where does APIRoute build its route handler",
+      "How does solve_dependencies resolve Depends parameters"
+    ]
+  },
+  {
+    "name": "flask",
+    "url": "https://github.com/pallets/flask",
+    "commit": "a29f88ce6f2f9843bd6fcbbfce1390a2071965d6",
+    "language": "python",
+    "size_category": "small",
+    "test_commits": [
+      {
+        "sha": "fbb6f0bc4c60a0bada0e03c3480d0ccf30a3c1df",
+        "description": "all teardown callbacks are called despite errors",
+        "changed_files": 10
+      },
+      {
+        "sha": "a29f88ce6f2f9843bd6fcbbfce1390a2071965d6",
+        "description": "document that headers must be set before streaming",
+        "changed_files": 4
+      }
+    ],
+    "entry_points": [
+      "src/flask/app.py::Flask.wsgi_app",
+      "src/flask/sansio/app.py::App.add_url_rule"
+    ],
+    "search_queries": [
+      {
+        "query": "Flask wsgi",
+        "expected": "src/flask/app.py::Flask"
+      },
+      {
+        "query": "AppContext globals",
+        "expected": "src/flask/ctx.py::AppContext"
+      },
+      {
+        "query": "create logger",
+        "expected": "src/flask/logging.py::create_logger"
+      }
+    ],
+    "multi_hop_tasks": [
+      {
+        "id": "flask-dispatch-callers",
+        "nl_query": "Where Flask dispatches HTTP requests",
+        "anchor_qualified_suffix": "src/flask/app.py::flask.dispatch_request",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "full_dispatch_request"
+        ],
+        "k": 10
+      },
+      {
+        "id": "flask-exception-callers",
+        "nl_query": "Where Flask handles uncaught exceptions",
+        "anchor_qualified_suffix": "src/flask/app.py::flask.handle_exception",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "wsgi_app"
+        ],
+        "k": 10
+      }
+    ],
+    "agent_questions": [
+      "How does dispatch_request route an incoming HTTP request",
+      "Where is the AppContext pushed and popped",
+      "How does create_logger configure application logging"
+    ]
+  },
+  {
+    "name": "gin",
+    "url": "https://github.com/gin-gonic/gin",
+    "commit": "5c00df8afadd06cc5be530dde00fe6d9fa4a2e4a",
+    "language": "go",
+    "size_category": "small",
+    "test_commits": [
+      {
+        "sha": "052d1a79aafe3f04078a2716f8e77d4340308383",
+        "description": "feat(render): add PDF renderer and tests",
+        "changed_files": 5
+      },
+      {
+        "sha": "472d086af2acd924cb4b9d7be0525f7d790f69bc",
+        "description": "fix(tree): panic in findCaseInsensitivePathRec with RedirectFixedPath",
+        "changed_files": 2
+      },
+      {
+        "sha": "5c00df8afadd06cc5be530dde00fe6d9fa4a2e4a",
+        "description": "fix(render): write content length in Data.Render",
+        "changed_files": 2
+      }
+    ],
+    "entry_points": [
+      "gin.go::Engine",
+      "routergroup.go::RouterGroup"
+    ],
+    "search_queries": [
+      {
+        "query": "Engine ServeHTTP",
+        "expected": "gin.go::Engine"
+      },
+      {
+        "query": "Context request",
+        "expected": "context.go::Context"
+      },
+      {
+        "query": "node tree",
+        "expected": "tree.go::node"
+      }
+    ],
+    "multi_hop_tasks": [
+      {
+        "id": "gin-serve-http-callees",
+        "nl_query": "What does the gin engine do when serving an HTTP request",
+        "anchor_qualified_suffix": "gin.go::engine.servehttp",
+        "traversal_pattern": "callees_of",
+        "expected_neighbor_names": [
+          "reset"
+        ],
+        "k": 10
+      },
+      {
+        "id": "gin-context-next-callers",
+        "nl_query": "Who advances the gin middleware chain via Context.Next",
+        "anchor_qualified_suffix": "context.go::context.next",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "handleHTTPRequest",
+          "serveError"
+        ],
+        "k": 10
+      }
+    ],
+    "agent_questions": [
+      "How does Engine.ServeHTTP route an incoming request",
+      "Where does Context.Next advance the middleware chain",
+      "How does the node tree match wildcard routes"
+    ]
+  },
+  {
+    "name": "httpx",
+    "url": "https://github.com/encode/httpx",
+    "commit": "b55d4635701d9dc22928ee647880c76b078ba3f2",
+    "language": "python",
+    "size_category": "small",
+    "test_commits": [
+      {
+        "sha": "ae1b9f66238f75ced3ced5e4485408435de10768",
+        "description": "Expose FunctionAuth in __all__",
+        "changed_files": 3
+      },
+      {
+        "sha": "b55d4635701d9dc22928ee647880c76b078ba3f2",
+        "description": "Upgrade Python type checker mypy",
+        "changed_files": 4
+      }
+    ],
+    "entry_points": [
+      "httpx/_client.py::Client",
+      "httpx/_client.py::AsyncClient"
+    ],
+    "search_queries": [
+      {
+        "query": "Client request",
+        "expected": "httpx/_client.py::Client"
+      },
+      {
+        "query": "Response headers",
+        "expected": "httpx/_models.py::Response"
+      },
+      {
+        "query": "BaseClient",
+        "expected": "httpx/_client.py::BaseClient"
+      }
+    ],
+    "multi_hop_tasks": [
+      {
+        "id": "httpx-client-request-callers",
+        "nl_query": "Which HTTP verbs route through the httpx Client.request",
+        "anchor_qualified_suffix": "httpx/_client.py::client.request",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "get",
+          "options",
+          "head",
+          "post",
+          "put",
+          "patch"
+        ],
+        "k": 10
+      },
+      {
+        "id": "httpx-async-request-tests",
+        "nl_query": "Tests covering the httpx async client request method",
+        "anchor_qualified_suffix": "httpx/_client.py::asyncclient.request",
+        "traversal_pattern": "callers_of",
+        "expected_neighbor_names": [
+          "test_raise_for_status"
+        ],
+        "k": 10
+      }
+    ],
+    "agent_questions": [
+      "How does Client.request send an HTTP request",
+      "Where are Response headers parsed and decoded",
+      "How does BaseClient build request URLs"
+    ]
+  }
+]

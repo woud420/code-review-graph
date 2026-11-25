@@ -1,5 +1,6 @@
 pub mod canonical;
 pub mod daemon;
+pub mod git;
 pub mod graph;
 pub mod mcp;
 pub mod model;

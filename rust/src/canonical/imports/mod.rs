@@ -1,3 +1,4 @@
+pub(crate) mod rust;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};

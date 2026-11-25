@@ -25,9 +25,25 @@ use crate::{graph::Graph, model::ParsedFile};
 use imports::import_target;
 use source::{Declaration, Source};
 
+#[derive(Debug)]
+pub struct DiscoveryError {
+    pub base: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for DiscoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Incremental update failed: {}", self.reason)
+    }
+}
+
+impl std::error::Error for DiscoveryError {}
+
 pub struct IndexReport {
     pub base: Option<String>,
     pub interrupted: bool,
+    pub freshness_advanced: bool,
+    pub communities_affected: bool,
     pub changed_files: Vec<String>,
     pub dependent_files: Vec<String>,
     pub effective_level: postprocess::Level,
@@ -43,7 +59,7 @@ pub struct IndexReport {
     pub embeddings: embeddings::Refresh,
 }
 
-const INDEX_VERSION: &str = "2";
+const INDEX_VERSION: &str = "3";
 
 pub fn ensure_writable(path: &Path) -> Result<()> {
     let read_only = std::env::var("CRG_READ_ONLY").is_ok_and(|s| {
@@ -64,6 +80,10 @@ pub fn ensure_writable(path: &Path) -> Result<()> {
 }
 
 struct WriteLock(File);
+
+pub fn lock_for_review(db: &Path) -> Result<impl Drop> {
+    WriteLock::acquire(db.parent().context("missing graph directory")?, true)
+}
 
 impl WriteLock {
     fn acquire(dir: &Path, wait: bool) -> Result<Self> {
@@ -172,6 +192,11 @@ pub fn index_with_embeddings(
 
 pub enum Sources<'a> {
     Repository(Option<bool>),
+    Build {
+        follow: Option<bool>,
+        base: Option<&'a str>,
+        recurse_submodules: Option<bool>,
+    },
     Watching(&'a crate::graph::discovery::Inventory, &'a BTreeSet<String>),
 }
 
@@ -228,7 +253,7 @@ pub fn index_sources(
             );
         } else {
             match metadata(&tx, "rust_index_version")?.as_deref() {
-                Some("1") => upgrade = true,
+                Some("1" | "2") => upgrade = true,
                 Some(INDEX_VERSION) => {}
                 _ => anyhow::bail!("unsupported native index version"),
             }
@@ -248,16 +273,30 @@ pub fn index_sources(
         previous_state.as_deref(),
         Some("in-progress" | "postprocess-pending")
     );
-    let base = if root.join(".git").exists() {
-        metadata(&tx, "git_head_sha")?
-    } else {
-        Some("HEAD~1".to_owned())
+    let requested = match &sources {
+        Sources::Build { base, .. } => *base,
+        _ => None,
     };
+    let stored = metadata(&tx, "git_head_sha")?;
+    let has_git = root.ancestors().any(|p| p.join(".git").exists());
+    let base = requested.map(str::to_owned).or_else(|| {
+        if has_git {
+            stored.clone()
+        } else {
+            Some("HEAD~1".into())
+        }
+    });
+    let has_nodes = tx.query_row("SELECT EXISTS(SELECT 1 FROM nodes)", [], |r| {
+        r.get::<_, bool>(0)
+    })?;
     let full = full
         || upgrade
         || empty
-        || (root.join(".git").exists()
-            && !metadata(&tx, "git_head_sha")?.is_some_and(|sha| {
+        || !has_nodes
+        || previous_state.as_deref() == Some("in-progress")
+        || (requested.is_none()
+            && has_git
+            && !stored.as_ref().is_some_and(|sha| {
                 git(
                     &root,
                     &[
@@ -269,6 +308,42 @@ pub fn index_sources(
                 )
                 .is_some()
             }));
+    let authoritative = has_git && stored.is_some() && base == stored;
+    let explicit = if let Some(base) = requested.filter(|_| !full) {
+        let valid = !base.starts_with('-')
+            && !base.is_empty()
+            && base
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.~^/@{}-".contains(&b));
+        let paths = if valid {
+            crate::git::changed_paths(&root, base, crate::git::Scope::Update { authoritative })
+        } else {
+            eprintln!("WARNING: Invalid git ref rejected: {base}");
+            Err(anyhow::anyhow!("invalid git diff base: {base}"))
+        };
+        Some(if authoritative {
+            paths.map_err(|error| DiscoveryError {
+                base: base.to_owned(),
+                reason: error.to_string(),
+            })?
+        } else {
+            paths.unwrap_or_default()
+        })
+    } else {
+        None
+    };
+    let scope = if let Some(paths) = &explicit {
+        let mut allowed = paths.iter().cloned().collect::<BTreeSet<_>>();
+        allowed.extend(file_hashes(&tx)?.into_keys().filter_map(|p| {
+            Path::new(&p)
+                .strip_prefix(&root)
+                .ok()
+                .map(|v| v.to_string_lossy().into_owned())
+        }));
+        Some(allowed)
+    } else {
+        None
+    };
     let mut graph = Graph::open(&path.with_extension("rust-cache"))?;
     let omitted = forget::unchanged_omissions(&tx, &root, full)?;
     let owned;
@@ -277,10 +352,23 @@ pub fn index_sources(
             owned = crate::graph::discovery::Inventory::for_index(&root, *follow)?;
             (&owned, None)
         }
+        Sources::Build {
+            follow,
+            recurse_submodules,
+            ..
+        } => {
+            owned =
+                crate::graph::discovery::Inventory::for_build(&root, *follow, *recurse_submodules)?;
+            (&owned, None)
+        }
         Sources::Watching(inventory, deferred) => (*inventory, Some(*deferred)),
     };
     let included = |path: &String| {
-        !omitted.contains(path) && deferred.is_none_or(|excluded| !excluded.contains(path))
+        !omitted.contains(path)
+            && deferred.is_none_or(|excluded| !excluded.contains(path))
+            && scope
+                .as_ref()
+                .is_none_or(|s| s.contains(path) || inventory.followed_files.contains(path))
     };
     graph.sync_paths(
         &root,
@@ -345,11 +433,12 @@ pub fn index_sources(
     let manifest = manifest.finalize().to_hex().to_string();
     let mut changed_files = Vec::new();
     let mut dependent_files = Vec::new();
+    let mut communities_affected = false;
     let mut parsed = 0;
     let mut deleted = 0;
     let mut changed = false;
     if full || metadata(&tx, "rust_source_manifest")?.as_deref() != Some(&manifest) {
-        (parsed, deleted) = writer.apply(&tx, &files, full)?;
+        (parsed, deleted, communities_affected) = writer.apply(&tx, &files, full)?;
         if !full {
             for (output, sql) in [
                 (
@@ -389,11 +478,27 @@ pub fn index_sources(
         }
         set_metadata(&tx, "verified_file_count", &files.len().to_string())?;
     }
-    if let Some(head) = git(&root, &["rev-parse", "--verify", "HEAD"]) {
+    if !changed && authoritative && !matches!(&sources, Sources::Watching(..)) {
+        tx.execute("INSERT OR REPLACE INTO metadata VALUES('last_updated',strftime('%Y-%m-%dT%H:%M:%S','now','localtime'))",[])?;
+        set_metadata(&tx, "last_build_type", "incremental")?;
+    }
+    let head = git(&root, &["rev-parse", "--verify", "HEAD"]);
+    let freshness_advanced = (changed || authoritative) && head.is_some();
+    if (full || changed || authoritative)
+        && let Some(head) = head
+    {
         set_metadata(&tx, "git_head_sha", &head)?;
         if let Some(branch) = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
             set_metadata(&tx, "git_branch", &branch)?;
         }
+    }
+    if let Some(mut paths) = explicit {
+        for path in changed_files {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        changed_files = paths;
     }
     let (updated_nodes, updated_edges) = if !full && changed {
         tx.query_row(
@@ -427,6 +532,9 @@ pub fn index_sources(
         embeddings: embeddings::Refresh::NotRequested,
         base: if full { None } else { base },
         interrupted,
+        freshness_advanced,
+        communities_affected: communities_affected
+            || !full && changed_files.iter().any(|p| !root.join(p).exists()),
         changed_files,
         dependent_files,
         effective_level,
@@ -606,8 +714,9 @@ impl Writer<'_> {
         tx: &Transaction<'_>,
         files: &BTreeMap<String, (String, String)>,
         full: bool,
-    ) -> Result<(usize, usize)> {
+    ) -> Result<(usize, usize, bool)> {
         begin_edges(tx)?;
+        let mut communities_affected = false;
         let mut old = file_hashes(tx)?;
         let mut digests = BTreeMap::new();
         for (relative, (hash, facts)) in files {
@@ -639,6 +748,9 @@ impl Writer<'_> {
                 false
             };
             if !unchanged || full || dbt_changed {
+                if !full && !communities_affected {
+                    communities_affected=tx.query_row("SELECT EXISTS(SELECT 1 FROM nodes WHERE file_path=? AND community_id IS NOT NULL)",[path], |r|r.get(0))?;
+                }
                 tx.execute("INSERT INTO affected VALUES(?)", [path])?;
                 tx.execute("DELETE FROM nodes WHERE file_path=?", [path])?;
             }
@@ -678,7 +790,7 @@ impl Writer<'_> {
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         if affected.is_empty() {
-            return Ok((0, deleted));
+            return Ok((0, deleted, deleted > 0));
         }
         let returns = evidence::ReturnIndex::read(self.staging)?;
         for absolute in &affected {
@@ -714,7 +826,11 @@ impl Writer<'_> {
         if !full {
             csharp::rebind(tx, self.staging, self.root)?;
         }
-        Ok((if full { files.len() } else { affected.len() }, deleted))
+        Ok((
+            if full { files.len() } else { affected.len() },
+            deleted,
+            communities_affected || deleted > 0,
+        ))
     }
 
     fn materialize_file(
@@ -1015,17 +1131,31 @@ impl Writer<'_> {
                 None,
             )?;
         }
+        let cargo = (source.language == "rust")
+            .then(|| imports::rust::Project::load(root, &full_path))
+            .flatten();
         for (line, module) in &source.imports {
-            let target = import_target(relative, module, source.language, paths)
-                .or_else(|| ts_paths.resolve(relative, module, |p| paths.contains(p)))
-                .map(|p| root.join(p).to_string_lossy().into_owned())
-                .unwrap_or_else(|| module.clone());
+            let target = if source.language == "rust" {
+                cargo
+                    .as_ref()
+                    .and_then(|project| project.resolve(module))
+                    .map(|p| p.to_string_lossy().into_owned())
+            } else {
+                import_target(relative, module, source.language, paths)
+                    .or_else(|| ts_paths.resolve(relative, module, |p| paths.contains(p)))
+                    .map(|p| root.join(p).to_string_lossy().into_owned())
+            }
+            .unwrap_or_else(|| module.clone());
             let (target, extra) = source
                 .import_details
                 .resolve(root, relative, module, target, *line, paths);
             import_edge(tx, path, &target, *line, &extra)?;
         }
-        for (kind, from, to, line) in source.extra_edges.rows(root, relative, facts, paths) {
+        for (kind, from, to, line) in
+            source
+                .extra_edges
+                .rows(root, relative, facts, paths, cargo.as_ref())
+        {
             if kind == "IMPORTS_FROM" {
                 let (target, extra) = source
                     .import_details
@@ -1071,7 +1201,7 @@ impl Writer<'_> {
         }
         for call in &facts.calls {
             if !resolved.contains(&(call.caller.clone(), call.callee.clone(), call.line)) {
-                let claim = source.claimed_call(root, relative, &call.callee, facts, paths);
+                let claim = source.claimed_call(root, relative, call, facts, paths);
                 let bare = claim
                     .as_ref()
                     .map(|(name, _)| name.as_str())

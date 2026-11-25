@@ -61,11 +61,21 @@ def main():
     parser.add_argument("--upstream", type=Path, required=True)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--report", type=Path)
-    parser.add_argument("--fixtures", action="store_true", help="compare the complete upstream multilingual fixture tree")
+    sample = parser.add_mutually_exclusive_group()
+    sample.add_argument("--rust-tree", type=Path, help="compare every Rust source below a directory")
+    sample.add_argument("--fixtures", action="store_true", help="compare the complete upstream multilingual fixture tree")
     args = parser.parse_args()
     source = args.upstream.resolve()
     verify_source(source)
-    if args.fixtures:
+    corpus = source
+    if args.rust_tree:
+        corpus = args.rust_tree.resolve(strict=True)
+        paths = sorted((corpus / "src").rglob("*.rs")) if (corpus / "Cargo.toml").is_file() else sorted(corpus.rglob("*.rs"))
+        if (corpus / "Cargo.toml").is_file():
+            paths.append(corpus / "Cargo.toml")
+        if not paths:
+            raise ValueError(f"no Rust source in {corpus}")
+    elif args.fixtures:
         paths = sorted(p for p in (source / "tests/fixtures").rglob("*") if p.is_file() and "__pycache__" not in p.parts)
         digest = hashlib.sha256()
         for p in paths:
@@ -74,7 +84,7 @@ def main():
             raise ValueError("upstream fixture files differ from the pinned revision")
     else:
         paths = sorted((source / "code_review_graph").rglob("*.py"))
-    files = {p.relative_to(source).as_posix(): p.read_text(encoding="utf-8") for p in paths}
+    files = {p.relative_to(corpus).as_posix(): p.read_text(encoding="utf-8") for p in paths}
     with tempfile.TemporaryDirectory(prefix="crg-canonical-") as tmp:
         directory = Path(tmp).resolve()
         root = directory / "source"

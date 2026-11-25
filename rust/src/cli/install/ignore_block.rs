@@ -2,12 +2,12 @@ use super::{Plan, changes};
 use anyhow::{Context, Result, ensure};
 use std::{collections::BTreeSet, path::Path};
 
-const START: &str = "# >>> code-review-graph install files >>>";
-const NOTE: &str =
+pub(super) const START: &str = "# >>> code-review-graph install files >>>";
+pub(super) const NOTE: &str =
     "# Added by `code-review-graph install --gitignore`. `uninstall` removes this block.";
-const END: &str = "# <<< code-review-graph install files <<<";
+pub(super) const END: &str = "# <<< code-review-graph install files <<<";
 
-fn valid(entry: &str) -> bool {
+pub(super) fn valid(entry: &str) -> bool {
     entry.strip_prefix('/').is_some_and(|path| {
         path.trim_end_matches('/').split('/').all(|part| {
             !part.is_empty()
