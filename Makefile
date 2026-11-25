@@ -40,68 +40,50 @@ PARITY_REPORT_DIR ?= $(TARGET_DIR)/parity
 
 .PHONY: parity graph-parity public-parity fixture-parity upstream-surface cutover
 
-parity:
-	cargo build --workspace --bins --locked
-	"$(PYTHON)" -B rust/tests/cfamily_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/java_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/java_events_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/rescript_modules_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/java_aop_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/resolver_counts_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/php_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/lua_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/extended_languages_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/powershell_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/vbnet_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/robot_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/solidity_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/csharp_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/go_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/differential.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph-rs" --whole-package
-	"$(PYTHON)" -B rust/tests/mcp_stdio.py "$(TARGET_DIR)/debug/code-review-graph-rs"
-	"$(PYTHON)" -B rust/tests/build_tool_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/submodule_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/unversioned_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/source_fixture_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/sql_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/hcl_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/standalone_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/forget_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/ruby_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/rename_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/eval_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/eval_runner_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/eval_fidelity_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/eval_retrieval_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/embedding_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/installer_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/uninstall_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/bindings_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/client_assets_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/install_options_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/hooks_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/http_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/update_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/rust_scoped_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/worktree_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/doctor_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/watch_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/follow_symlinks_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/rust_project_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/language_coverage_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/visualize_parity.py --serve --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/history_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/config_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/query_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/detect_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/postprocess_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
-	"$(PYTHON)" -B rust/tests/search_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+PARITY_CASES := cfamily_parity java_parity java_events_parity rescript_modules_parity \
+  java_aop_parity resolver_counts_parity php_parity lua_parity \
+  extended_languages_parity powershell_parity vbnet_parity robot_parity \
+  solidity_parity csharp_parity go_parity differential \
+  mcp_stdio build_tool_parity submodule_parity unversioned_parity \
+  source_fixture_parity sql_parity hcl_parity standalone_parity \
+  forget_parity ruby_parity rename_parity eval_parity \
+  eval_runner_parity eval_fidelity_parity eval_retrieval_parity embedding_parity \
+  installer_parity uninstall_parity bindings_parity client_assets_parity \
+  install_options_parity hooks_parity http_parity update_parity \
+  rust_scoped_parity worktree_parity doctor_parity watch_parity \
+  follow_symlinks_parity rust_project_parity language_coverage_parity visualize_parity \
+  history_parity config_parity query_parity detect_parity \
+  postprocess_parity search_parity
+PROOF_CASES := cfamily_parity java_parity php_parity lua_parity \
+  extended_languages_parity powershell_parity vbnet_parity robot_parity \
+  solidity_parity csharp_parity go_parity
+
+PARITY_TARGETS := $(addprefix compare-,$(PARITY_CASES))
+NATIVE_CLI := $(TARGET_DIR)/debug/code-review-graph
+PROOF_CLI := $(TARGET_DIR)/debug/code-review-graph-rs
+REFERENCE_ARGS = --upstream "$(REFERENCE)" --binary "$(NATIVE_CLI)"
+
+.PHONY: $(PARITY_TARGETS)
+parity: $(PARITY_TARGETS)
+
+$(PARITY_TARGETS): parity-binary
+$(addprefix compare-,$(PROOF_CASES)): EXTRA_ARGS = --proof-binary "$(PROOF_CLI)"
+compare-visualize_parity: EXTRA_ARGS = --serve
+
+$(filter-out compare-differential compare-mcp_stdio,$(PARITY_TARGETS)): compare-%:
+	"$(PYTHON)" -B rust/tests/$*.py $(REFERENCE_ARGS) $(EXTRA_ARGS)
+
+compare-differential:
+	"$(PYTHON)" -B rust/tests/differential.py --upstream "$(REFERENCE)" --binary "$(PROOF_CLI)" --whole-package
+
+compare-mcp_stdio:
+	"$(PYTHON)" -B rust/tests/mcp_stdio.py "$(PROOF_CLI)"
 
 released-contract upstream-surface public-parity graph-parity fixture-parity rust-parity: parity-binary
 
 .PHONY: parity-binary
 parity-binary:
-	cargo build --locked --bin code-review-graph --bin crg-daemon
+	cargo build --workspace --locked --bins
 	mkdir -p "$(PARITY_REPORT_DIR)"
 
 public-parity:
