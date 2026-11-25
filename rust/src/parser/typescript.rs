@@ -8,7 +8,7 @@ use crate::model::{Call, Export, Import, ParsedFile, Symbol};
 pub fn parse_typescript(path: &Path, source: &str) -> Result<ParsedFile> {
     let grammar = match path.extension().and_then(|ext| ext.to_str()) {
         Some("tsx") => tree_sitter_typescript::LANGUAGE_TSX,
-        Some("ts" | "cts" | "mts") => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+        Some("ts" | "cts" | "mts" | "astro") => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
         Some("js" | "jsx" | "cjs" | "mjs") => tree_sitter_javascript::LANGUAGE,
         _ => bail!(
             "unsupported JavaScript or TypeScript path {}",

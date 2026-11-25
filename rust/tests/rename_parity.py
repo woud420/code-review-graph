@@ -3,11 +3,13 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from mcp_contract import WireClient
 from public_parity import pinned_reference
@@ -24,14 +26,39 @@ def server(command, root, env):
 
 
 def call(client, name, args):
+    started = time.time()
     wire = client.call("tools/call", {"name": name, "arguments": args})
+    finished = time.time()
     assert not wire["notifications"], wire
     envelope = wire["response"]["result"]
     assert envelope["isError"] is False, envelope
     value = envelope["structuredContent"]
     assert envelope["content"] == [{"type": "text", "text": json.dumps(
         value, ensure_ascii=False, separators=(",", ":"))}], envelope
+    graph = value.get("_graph", {})
+    assert "age_seconds" not in graph or "updated_at" in graph, value
+    if "updated_at" in graph:
+        built = datetime.fromisoformat(graph["updated_at"])
+        # Both servers run in UTC and interpret a naive build timestamp in their local zone.
+        epoch = (built if built.tzinfo else built.replace(tzinfo=timezone.utc)).timestamp()
+        age = graph.get("age_seconds")
+        # SQLite samples its wall clock in milliseconds. Account for that precision at the
+        # boundary, while rejecting incorrect ages even when both implementations agree.
+        low = max(0, int(started - epoch - 0.001))
+        high = max(0, int(finished - epoch + 0.001))
+        assert type(age) is int and low <= age <= high, (value, started, finished, low, high)
+    if "created_at" in value:
+        assert started <= value["created_at"] <= finished, (value, started, finished)
     return value
+
+
+def assert_same_response(actual, expected):
+    def deterministic_fields(value):
+        if "age_seconds" not in value.get("_graph", {}):
+            return value
+        # Each request's actual age was validated against its own observation window.
+        return {**value, "_graph": {**value["_graph"], "age_seconds": "<measured>"}}
+    assert deterministic_fields(actual) == deterministic_fields(expected), (actual, expected)
 
 
 def normalized_preview(data):
@@ -39,7 +66,7 @@ def normalized_preview(data):
     if value.get("status") == "ok":
         identifier = value.pop("refactor_id")
         assert re.fullmatch("[0-9a-f]{8}", identifier)
-        assert 0 <= time.time() - value.pop("created_at") < 60
+        del value["created_at"]
         assert identifier in value["summary"]
         value["summary"] = value["summary"].replace(identifier, "<preview>")
     return value
@@ -54,7 +81,10 @@ class Comparison:
     def preview(self, **args):
         expected = call(self.reference, "refactor_tool", args)
         actual = call(self.native, "refactor_tool", args)
-        assert normalized_preview(actual) == normalized_preview(expected)
+        return self.check_preview(actual, expected)
+
+    def check_preview(self, actual, expected):
+        assert_same_response(normalized_preview(actual), normalized_preview(expected))
         if actual["status"] == "ok":
             assert actual["refactor_id"] not in self.pairs
             self.pairs[actual["refactor_id"]] = expected["refactor_id"]
@@ -66,7 +96,7 @@ class Comparison:
         ids = (self.pairs.get(refactor_id, refactor_id), refactor_id)
         def request(client, identifier):
             return call(client, "apply_refactor_tool", dict(args, refactor_id=identifier))
-        # Replay both implementations against identical source bytes at the identical absolute paths.
+        # Replay both implementations against identical bytes at the same absolute paths.
         root = Path(repo_root)
         sources = [f for f in root.rglob("*") if f.is_file() and
                    not {".git", ".code-review-graph", "__pycache__"}.intersection(f.parts)]
@@ -80,7 +110,7 @@ class Comparison:
         actual = request(self.native, ids[1])
         if expected.get("status") == "error":
             expected["error"] = expected["error"].replace(ids[0], ids[1])
-        assert actual == expected
+        assert_same_response(actual, expected)
         assert {f: f.read_bytes() for f in sources} == expected_bytes
         self.counts["dry_run" if dry_run else "apply"] += 1
         return actual
@@ -126,6 +156,34 @@ def guard_cases(comp, root, build):
         assert other.read_bytes() == b"def helper():\n    return 1\n"
 
 
+def star_reexport_across_seconds(comp, root, build):
+    for package in ("pkg", "app"):
+        (root / package).mkdir(parents=True)
+    (root / "pkg/__init__.py").write_text("from .util import *\n")
+    (root / "app/__init__.py").write_bytes(b"")
+    home = root / "pkg/util.py"
+    caller = root / "app/use.py"
+    home.write_text("__all__ = ['helper']\n\ndef helper(x):\n    return x * 2\n")
+    caller.write_text("from pkg import helper\n\nVALUE = helper(3)\n")
+    build(root)
+    with sqlite3.connect(root / ".code-review-graph/graph.db") as db:
+        db.execute("UPDATE metadata SET value='2020-01-01T00:00:00Z' WHERE key='last_updated'")
+    args = dict(mode="rename", old_name="helper", new_name="double", repo_root=str(root))
+    expected = call(comp.reference, "refactor_tool", args)
+    time.sleep(1.01)
+    actual = call(comp.native, "refactor_tool", args)
+    assert actual["_graph"]["age_seconds"] > expected["_graph"]["age_seconds"]
+    preview = comp.check_preview(actual, expected)
+    sites = [(caller, 1, 17, "import"), (caller, 3, 9, "call"),
+             (home, 1, 13, "__all__"), (home, 3, 5, "definition")]
+    assert preview["edits"] == [
+        dict(file=str(path), line=line, column=column, old="helper", new="double",
+             site=site, confidence="high") for path, line, column, site in sites]
+    assert comp.apply(preview["refactor_id"], str(root))["edits_applied"] == 4
+    assert home.read_bytes() == b"__all__ = ['double']\n\ndef double(x):\n    return x * 2\n"
+    assert caller.read_bytes() == b"from pkg import double\n\nVALUE = double(3)\n"
+
+
 def main():
     import pytest
     opts = argparse.ArgumentParser(description=__doc__)
@@ -140,7 +198,10 @@ def main():
     sys.path.insert(0, str(source))
     with tempfile.TemporaryDirectory(prefix="crg-rename-oracle-") as name:
         root = Path(name).resolve()
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "CRG_", "FASTMCP_"))}
+        stripped = ("PYTHON", "CRG_", "FASTMCP_")
+        env = {k: v for k, v in os.environ.items() if not k.startswith(stripped)}
+        if "PYTHONHASHSEED" in os.environ:
+            env["PYTHONHASHSEED"] = os.environ["PYTHONHASHSEED"]
         env.update(CRG_HOME=str(root / "registry"), TZ="UTC")
         ref = server([sys.executable, "-m", "code_review_graph"], root,
                      dict(env, PYTHONPATH=str(source), PYTHONDONTWRITEBYTECODE="1"))
@@ -157,6 +218,7 @@ def main():
                 with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
                     full_build(repo, store)
             guard_cases(comp, root / "stale", build)
+            star_reexport_across_seconds(comp, root / "reexport", build)
             print("Native and Python stdio responses and file bytes matched", comp.counts)
         finally:
             native.close()

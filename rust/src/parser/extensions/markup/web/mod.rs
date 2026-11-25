@@ -24,6 +24,7 @@ pub(crate) fn language(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()? {
         "html" | "htm" => Some("html"),
         "vue" => Some("vue"),
+        "svelte" => Some("svelte"),
         _ => None,
     }
 }

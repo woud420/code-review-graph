@@ -76,6 +76,18 @@ def main():
     }
     fixtures = list(fixture_args(source))
     assert len(fixtures) == 15, [n for n, _ in fixtures]
+    release_fixtures = len(fixtures)
+    fixtures.append(
+        (
+            "cargo_module_cache",
+            {
+                "Cargo.toml": '[package]\nname="cache_fixture"\nversion="0.1.0"\nedition="2021"\n',
+                "src/lib.rs": "mod folder;\nfn ping() {}\n",
+                "src/folder/a.rs": "pub(crate) fn seed(){ super::ping(); }\n",
+                "src/folder/mod.rs": "mod a;\npub(crate) fn ping() {}\npub(crate) fn run(){ super::ping(); }\n",
+            },
+        )
+    )
     count = 0
     with tempfile.TemporaryDirectory(prefix="crg-rust-scoped-") as t:
         data = Path(t).resolve()
@@ -100,9 +112,12 @@ def main():
                 )
                 results.append(calls(path / "graph.db"))
             assert results[0] and results[0] == results[1], (name, results)
+            if name == "cargo_module_cache":
+                targets = [r[1] for r in results[0] if r[0].endswith("folder/mod.rs::run")]
+                assert len(targets) == 1 and targets[0].endswith("folder/mod.rs::ping"), targets
             count += len(results[0])
     print(
-        f"{len(fixtures)} upstream Rust fixtures matched {count} call and test edges, targets, confidence, and receiver evidence."
+        f"{release_fixtures} upstream Rust fixtures and one Cargo directory-cache fixture matched {count} call/test edges, confidence and receiver evidence."
     )
 
 

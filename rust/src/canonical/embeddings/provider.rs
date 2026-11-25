@@ -1,3 +1,6 @@
+#[cfg(feature = "google-embeddings")]
+mod google;
+mod minimax;
 use anyhow::{Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
 use std::env;
@@ -10,6 +13,8 @@ enum Api {
     OpenAi,
     Voyage,
     MiniMax,
+    #[cfg(feature = "google-embeddings")]
+    Google,
 }
 pub(super) struct Provider {
     api: Api,
@@ -51,11 +56,12 @@ fn host_key(url: &Url) -> String {
     format!("{}://{host}{path}", url.scheme())
 }
 fn cloud_warning(name: &str, base: &Url) {
-    if setting("CRG_ACCEPT_CLOUD_EMBEDDINGS").as_deref() == Some("1")
-        || matches!(
-            base.host_str(),
-            Some("127.0.0.1" | "localhost" | "0.0.0.0" | "[::1]")
-        )
+    if setting("CRG_ACCEPT_CLOUD_EMBEDDINGS").is_some_and(|s| s.trim() == "1")
+        || matches!(name, "openai" | "voyage")
+            && matches!(
+                base.host_str(),
+                Some("127.0.0.1" | "localhost" | "0.0.0.0" | "[::1]")
+            )
     {
         return;
     }
@@ -141,11 +147,27 @@ impl Provider {
                 )
             }
             "google" => {
-                ensure!(
-                    setting("GOOGLE_API_KEY").is_some(),
-                    "GOOGLE_API_KEY environment variable is required for the Google embedding provider."
-                );
-                return Ok(None);
+                let key=setting("GOOGLE_API_KEY").ok_or_else(||anyhow!("GOOGLE_API_KEY environment variable is required for the Google embedding provider."))?;
+                #[cfg(not(feature = "google-embeddings"))]
+                {
+                    let _ = key;
+                    cloud_warning(
+                        "google",
+                        &Url::parse("https://generativelanguage.googleapis.com")?,
+                    );
+                    return Ok(None);
+                }
+                #[cfg(feature = "google-embeddings")]
+                {
+                    let base = setting("GOOGLE_GEMINI_BASE_URL")
+                        .unwrap_or_else(|| "https://generativelanguage.googleapis.com".into());
+                    (
+                        Api::Google,
+                        base,
+                        key,
+                        model.unwrap_or("gemini-embedding-001").to_owned(),
+                    )
+                }
             }
             "local" | "" => return Ok(None),
             other => bail!(
@@ -163,6 +185,8 @@ impl Provider {
             Api::OpenAi => format!("openai:{model}@{host}"),
             Api::Voyage => format!("voyage:{model}:dim{}:{dtype}@{host}", dim.unwrap_or(1024)),
             Api::MiniMax => "minimax:embo-01".into(),
+            #[cfg(feature = "google-embeddings")]
+            Api::Google => format!("google:{model}"),
         };
         let http = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(if api == Api::MiniMax {
@@ -187,6 +211,14 @@ impl Provider {
             http,
         }))
     }
+    fn post_embeddings(&self) -> ureq::Request {
+        let endpoint = format!("{}/embeddings", self.base.as_str().trim_end_matches('/'));
+        self.http
+            .post(&endpoint)
+            .set("Authorization", &format!("Bearer {}", self.key))
+            .set("Accept", "application/json")
+    }
+
     pub fn vectors(&self, texts: &[String], query: bool) -> Result<Vec<Vec<f64>>> {
         let mut out = Vec::new();
         for batch in texts.chunks(self.batch) {
@@ -205,12 +237,12 @@ impl Provider {
                     body["output_dtype"] = json!(self.dtype);
                     "Voyage"
                 }
+                #[cfg(feature = "google-embeddings")]
+                Api::Google => return google::vectors(self, texts, query),
                 Api::MiniMax => {
-                    body = json!({"model":self.model,"texts":batch,"type":if query{"query"}else{"db"}});
-                    "MiniMax"
+                    return minimax::vectors(&self.post_embeddings(), &self.model, texts, query);
                 }
             };
-            let endpoint = format!("{}/embeddings", self.base.as_str().trim_end_matches('/'));
             for attempt in 0..3 {
                 if !self.interval.is_zero() {
                     let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
@@ -219,32 +251,10 @@ impl Provider {
                     }
                     *last = Some(Instant::now());
                 }
-                let request = self
-                    .http
-                    .post(&endpoint)
-                    .set("Authorization", &format!("Bearer {}", self.key))
-                    .set("Accept", "application/json");
-                match request.send_json(&body) {
+                match self.post_embeddings().send_json(&body) {
                     Ok(resp) => {
                         let value: Value = resp.into_json()?;
-                        if self.api == Api::MiniMax {
-                            ensure!(
-                                value["base_resp"]["status_code"].as_i64().unwrap_or(0) == 0,
-                                "MiniMax API error: {}",
-                                value["base_resp"]["status_msg"]
-                                    .as_str()
-                                    .unwrap_or("unknown")
-                            );
-                            let vectors: Vec<Vec<f64>> =
-                                serde_json::from_value(value["vectors"].clone())?;
-                            ensure!(
-                                vectors.len() == batch.len(),
-                                "MiniMax API returned a different number of vectors than inputs"
-                            );
-                            out.extend(vectors);
-                        } else {
-                            out.extend(decode(label, value, batch.len())?);
-                        }
+                        out.extend(decode(label, value, batch.len())?);
                         break;
                     }
                     Err(ureq::Error::Status(code, resp)) => {

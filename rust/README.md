@@ -19,6 +19,8 @@ Use `--skip-flows` for a build with signatures and text search. Use `--skip-post
 
 The earlier `code-review-graph-rs` binary exposes the original proof interface. It stores a separate index in `.code-review-graph-rs/graph.db`. Its `query callers-of` and `query callees-of` commands report distinct symbols. The public binary's `query callers_of` and `query callees_of` also expose the individual call sites.
 
+Repository-specific languages can reuse a grammar compiled into the binary. In `.code-review-graph/languages.toml`, register the extensions, grammar, definition and call node types, and optional `name_field` according to the [configuration reference](../docs/CUSTOM_LANGUAGES.md). Builds also recognize Svelte script blocks, Astro source through the TypeScript parser, and Laravel Blade import and Livewire directives. The Python reference has access to additional grammars from its language pack, including Erlang and Markdown.
+
 ## Platform integrations
 
 Use `code-review-graph install --platform NAME --repo PATH --dry-run` to preview a registration. Both `install` and `init` detect installed clients by default. A named platform can be configured before its client is installed.
@@ -52,13 +54,19 @@ The pinned graph fixtures exercise 95 upstream production modules and all 77 fil
 
 For Claude Code and Codex, `install --platform claude` and `install --platform codex` write the path to the native executable into the MCP config. Run `--dry-run` to preview the changes. Their launcher and hook paths intentionally differ from a Python installation. The installer comparison starts both installed servers and checks the resulting config, Markdown, hooks, reruns and scoped uninstall in temporary homes.
 
-The embedding comparison uses local HTTP servers for the OpenAI-compatible and Voyage formats. Optional local transformer inference and Google model inference are outside that comparison.
+The default embedding comparison uses local HTTP servers for the OpenAI-compatible and Voyage formats. `make minimax-parity` compares the built-in MiniMax transport with the release provider on loopback, including 100-document batching, query vectors and retry behavior. Optional local transformer inference is outside that comparison.
 
 For an architecture check, run `deslop-please` at the workspace root with `rust-analyzer` on the executable search path.
 
+### Optional Google embeddings
+
+Build with `cargo build --release --locked --features google-embeddings` for the Gemini Developer API. Select it with `embed --provider google` and set `GOOGLE_API_KEY`. The native client supports `GOOGLE_GEMINI_BASE_URL`, batches of 100 documents, query embeddings, transient retries and cache refreshes.
+
+`make google-embedding-parity REFERENCE=/path/to/reference PYTHON=/path/to/reference/.venv/bin/python` compares the Google protocol and SQLite rows using a loopback server and a fixture key. Install the pinned reference’s Google extra or set `GOOGLE_REFERENCE_PACKAGES` to its SDK directory.
+
 ### Optional token verification
 
-Build with `cargo build --release --locked --features tokenizer` to measure `update --brief --verify` and `detect-changes --brief --verify` with the bundled cl100k_base vocabulary. Token counting runs offline inside the native binary.
+Build with `cargo build --release --locked --features tokenizer` to measure `update --brief --verify` and `detect-changes --brief --verify` with the bundled cl100k_base vocabulary. Token counting runs offline inside the native binary. `make tokenizer-parity REFERENCE=/path/to/reference PYTHON=/path/to/reference/.venv/bin/python TOKENIZER_REFERENCE_PACKAGES=/path/to/tiktoken-packages` compares the default and feature-enabled builds. CI installs `tiktoken==0.14.0` into this separate directory and uses the checksum-verified vocabulary from Cargo’s registry cache.
 
 ### Optional SVG export
 

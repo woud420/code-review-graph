@@ -80,6 +80,9 @@ def scenario(command, root, env, http, pristine):
     cli("local", ["embed"])
     for provider in ("openai", "google", "minimax", "voyage"):
         cli("missing-" + provider, ["embed","--provider",provider])
+    cli("google-without-optional-sdk", ["embed","--provider","google"],
+        {"GOOGLE_API_KEY":"fixture-key","GOOGLE_GEMINI_BASE_URL":url})
+    assert not http.requests
     protocol({}, [("invalid-provider","embed_graph_tool",{"provider":"not-real"})])
     cli("index", ["embed"], ai)
     facts["rows"] = snapshot(db)

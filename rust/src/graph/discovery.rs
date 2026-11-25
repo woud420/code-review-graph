@@ -19,7 +19,11 @@ pub struct Inventory {
 }
 
 fn supported(path: &Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let normalized = crate::parser::normalized_path(path);
+    let ext = normalized
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -32,6 +36,7 @@ fn supported(path: &Path) -> bool {
         && !name.ends_with(".lock.json")
         && !name.ends_with(".min.json");
     super::JS_EXTENSIONS.contains(&ext)
+        || ext == "astro"
         || matches!(
             ext,
             "py" | "rs"
@@ -51,7 +56,11 @@ fn supported(path: &Path) -> bool {
         || crate::parser::extensions::language(ext).is_some()
         || json
         || crate::parser::cfamily::supports(ext)
-        || crate::parser::bash::discover(path)
+        || (if path.extension().is_some() {
+            crate::parser::bash::supports(&normalized, &[])
+        } else {
+            crate::parser::bash::discover(path)
+        })
         || crate::parser::sql::supports(ext)
         || (ext == "properties" && crate::parser::yaml::spring::supports(path))
 }
@@ -261,6 +270,7 @@ impl Inventory {
         recurse_submodules: Option<bool>,
     ) -> Result<Self> {
         let tracked = submodule_inventory(root, recurse_submodules);
+        let custom = crate::parser::custom::Registry::load(root);
         let rules = std::sync::Arc::new(ignores(root)?);
         let mut files = BTreeSet::new();
         let mut followed_files = BTreeSet::new();
@@ -323,7 +333,7 @@ impl Inventory {
                     if !logical.as_os_str().is_empty() {
                         followed += 1;
                     }
-                    let is_source = supported(p)
+                    let is_source = (supported(p) || custom.supports(p))
                         && (!logical.as_os_str().is_empty()
                             || tracked.as_ref().is_none_or(|files| files.contains(&path)));
                     let control = p.extension().is_some_and(|ext| ext == "csproj")
@@ -356,4 +366,52 @@ impl Inventory {
             stamps,
         })
     }
+}
+
+// With no VCS manifest the reference inserts each directory's files in scandir
+// order. Equal-frequency community labels use the first member as a tie-breaker.
+pub(crate) fn order_unversioned(root: &Path, files: &mut [String]) -> Result<()> {
+    let mut needed = BTreeSet::new();
+    for file in files.iter() {
+        for dir in Path::new(file)
+            .ancestors()
+            .skip(1)
+            .take_while(|d| d.starts_with(root))
+        {
+            needed.insert(dir.to_path_buf());
+        }
+    }
+    let children = |dir: &Path| -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+        let mut dirs = Vec::new();
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if needed.contains(&path) {
+                dirs.push(path);
+            } else {
+                entries.push(path);
+            }
+        }
+        Ok((dirs, entries))
+    };
+    let (dirs, mut ordered) = children(root)?;
+    let mut pending = vec![dirs];
+    while let Some(siblings) = pending.pop() {
+        let mut descendants = Vec::new();
+        for dir in siblings {
+            let (dirs, items) = children(&dir)?;
+            ordered.extend(items);
+            if !dirs.is_empty() {
+                descendants.push(dirs);
+            }
+        }
+        pending.extend(descendants.into_iter().rev());
+    }
+    let positions: BTreeMap<_, _> = ordered
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| (p, i))
+        .collect();
+    files.sort_by_key(|p| positions.get(Path::new(p)).copied().unwrap_or(usize::MAX));
+    Ok(())
 }

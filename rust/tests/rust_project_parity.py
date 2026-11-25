@@ -1,4 +1,4 @@
-"""Compare Rust import/trait target paths and confidence metadata against a pinned Cargo workspace."""
+"""Compare Rust imports, trait implementations, callback references and calls against a pinned Cargo workspace."""
 import argparse
 from collections import Counter
 import json
@@ -20,7 +20,7 @@ def edges(db, repo):
              line, resolution, json.dumps(json.loads(extra or "{}"), sort_keys=True).replace(root,""), tier, confidence)
             for kind, source, target, file, line, resolution, extra, tier, confidence in con.execute(
                 "SELECT kind,source_qualified,target_qualified,file_path,line,target_resolution,"
-                "extra,confidence_tier,confidence FROM edges WHERE kind IN ('IMPORTS_FROM','IMPLEMENTS','REFERENCES') "
+                "extra,confidence_tier,confidence FROM edges WHERE kind IN ('IMPORTS_FROM','IMPLEMENTS','REFERENCES','CALLS') "
                 "AND file_path LIKE '%.rs'"
             )
         )
@@ -41,8 +41,8 @@ def main():
             "dep/Cargo.toml": '[package]\nname="traits-library"\nversion="0.1.0"\n[lib]\npath="code/root.rs"\n',
             "dep/code/root.rs": "pub mod shapes;\npub trait Root {}\n",
             "dep/code/shapes/mod.rs":"pub trait Shape<T> {}\npub struct Square;\n",
-            "app/src/lib.rs": "pub mod models;\npub mod inner;\n",
-            "app/src/models.rs":"pub struct Model<T>(pub T);\npub trait Print<T> {}\npub fn notify() {}\n",
+            "app/src/lib.rs": "pub mod models;\npub mod inner;\npub fn boot() { models::notify(); }\n",
+            "app/src/models.rs":"pub struct Model<T>(pub T);\npub trait Print<T> {}\npub fn notify() {}\nimpl<T> Model<T> { pub fn new(v: T) -> Self { Model(v) } }\n",
             "app/src/vec.rs":"pub struct Item;\n",
             "app/src/inner/mod.rs": "pub mod use_it;\npub struct Child;\n",
             "app/src/inner/use_it.rs": (
@@ -55,6 +55,8 @@ def main():
                 "use outside::Lost;\nuse missing::Missing;\nuse Vec::Item;\n"
                 "use std::{fmt::{self, Display as D}, io::Read};\nuse crate::models::*;\n"
                 "use crate::models::{notify, notify as callback};\nuse unknown_pkg::foreign;\n"
+                "use crate::models as data;\n"
+                "fn via_module() { data::notify(); M::new(5); M::derived(); callback(); }\n"
                 "fn deliver() { consume(notify); consume(callback); consume(foreign); }\n"
                 "struct Wrap<T>(T);\ntrait Local {}\n"
                 "impl<T> S<T> for Wrap<T> {}\nimpl<T> P<T> for Wrap<T> {}\n"
@@ -102,8 +104,11 @@ def main():
             assert not any("[" in src or "&" in src for src,_ in traits),traits
             refs={row[2] for row in a if row[0]=="REFERENCES"}
             assert {"app/src/models.rs::notify","foreign"}<=refs, refs
+            calls={row[2] for row in a if row[0]=="CALLS"}
+            assert {"app/src/models.rs::notify","app/src/models.rs::Model.new"}<=calls,calls
+            assert any(row[0]=="CALLS" and "app/src/models.rs::Model.derived" in row[6] for row in a)
             assert not any(str(outside) in row[2] for row in a)
-            print(f"{label}: {sum(c for x,c in a.items() if x[0]=='IMPORTS_FROM')} imports and {sum(c for x,c in a.items() if x[0]=='IMPLEMENTS')} impl edges, {sum(c for x,c in a.items() if x[0]=='REFERENCES')} callback references match, including confidence and metadata")
+            print(f"{label}: {sum(c for x,c in a.items() if x[0]=='IMPORTS_FROM')} imports and {sum(c for x,c in a.items() if x[0]=='IMPLEMENTS')} impl edges, {sum(c for x,c in a.items() if x[0]=='REFERENCES')} callback references and {sum(c for x,c in a.items() if x[0]=='CALLS')} calls match, including confidence and metadata")
 
 
 if __name__=="__main__":

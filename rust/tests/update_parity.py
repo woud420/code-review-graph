@@ -80,6 +80,20 @@ def action(command, root, env, args, tool=False):
         client.close()
 
 
+def tokenizer_vocabulary(path):
+    if path is None:
+        import tomllib
+
+        lock = Path(__file__).resolve().parents[2] / "Cargo.lock"
+        packages = tomllib.loads(lock.read_text())["package"]
+        version = next(p["version"] for p in packages if p["name"] == "tiktoken-rs")
+        registry = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo")) / "registry/src"
+        path = next(registry.glob(f"*/tiktoken-rs-{version}/assets/cl100k_base.tiktoken"), None)
+        if path is None:
+            raise FileNotFoundError("Set --tokenizer-vocabulary to the cl100k_base.tiktoken file")
+    return path.read_bytes()
+
+
 def main():
     flags = argparse.ArgumentParser(description=__doc__)
     flags.add_argument("--upstream", type=Path, required=True)
@@ -201,7 +215,7 @@ def main():
         if args.tokenizer_binary:
             import hashlib
 
-            vocab = args.tokenizer_vocabulary.read_bytes()
+            vocab = tokenizer_vocabulary(args.tokenizer_vocabulary)
             assert (
                 hashlib.sha256(vocab).hexdigest()
                 == "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
@@ -210,9 +224,12 @@ def main():
             cache.mkdir()
             url = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
             (cache / hashlib.sha1(url.encode()).hexdigest()).write_bytes(vocab)
+            paths = [str(source)]
+            if args.tokenizer_pythonpath:
+                paths.append(str(args.tokenizer_pythonpath.resolve()))
             tokenizer_env = dict(
                 refenv,
-                PYTHONPATH=os.pathsep.join([str(source), str(args.tokenizer_pythonpath.resolve())]),
+                PYTHONPATH=os.pathsep.join(paths),
                 TIKTOKEN_CACHE_DIR=str(cache),
             )
             for name, files in [

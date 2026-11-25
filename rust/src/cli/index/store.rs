@@ -46,8 +46,9 @@ pub fn open(db: &Path) -> Result<Connection> {
     );
     code_review_graph_rs::canonical::database::permissions(db)?;
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    conn.execute_batch("BEGIN DEFERRED")?;
     code_review_graph_rs::canonical::database::validate(&conn, db)?;
+    code_review_graph_rs::canonical::database::migrate::before_read(db, &conn)?;
+    conn.execute_batch("BEGIN DEFERRED")?;
     Ok(conn)
 }
 

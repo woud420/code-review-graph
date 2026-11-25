@@ -1,3 +1,5 @@
+#[path = "markup/blade.rs"]
+pub(crate) mod blade;
 #[path = "scripting/dart.rs"]
 mod dart;
 #[path = "scripting/elixir.rs"]
@@ -17,13 +19,18 @@ pub(crate) mod notebook;
 mod objc;
 #[path = "scripting/perl.rs"]
 mod perl;
+#[path = "scripting/powershell.rs"]
+mod powershell;
 #[path = "scripting/r.rs"]
 mod r;
 mod rescript;
+#[path = "markup/robot.rs"]
+pub(crate) mod robot;
 #[path = "jvm/scala.rs"]
 mod scala;
 #[path = "native/swift.rs"]
 mod swift;
+mod vbnet;
 #[path = "native/verilog.rs"]
 mod verilog;
 #[path = "markup/web/mod.rs"]
@@ -41,6 +48,9 @@ use tree_sitter::{Node, Parser};
 
 pub(crate) fn language(ext: &str) -> Option<&'static str> {
     Some(match ext {
+        "robot" | "resource" => "robot",
+        "vb" => "vbnet",
+        "ps1" | "psm1" | "psd1" => "powershell",
         "R" | "r" => "r",
         "xsl" | "xslt" => "xslt",
         "res" | "resi" => "rescript",
@@ -56,6 +66,7 @@ pub(crate) fn language(ext: &str) -> Option<&'static str> {
         "liquid" => "liquid",
         "html" | "htm" => "html",
         "vue" => "vue",
+        "svelte" => "svelte",
         "nix" => "nix",
         "zig" => "zig",
         "kt" | "kts" => "kotlin",
@@ -65,10 +76,19 @@ pub(crate) fn language(ext: &str) -> Option<&'static str> {
 }
 
 pub(super) fn parse(language: &str, path: &Path, source: &str) -> Result<ParsedFile> {
+    if language == "robot" {
+        return Ok(robot::parse(source));
+    }
+    if language == "vbnet" {
+        return Ok(vbnet::parse(path, source));
+    }
     if language == "liquid" {
         return Ok(liquid::parse(source));
     }
-    if matches!(language, "html" | "vue") {
+    if language == "blade" {
+        return Ok(blade::parse(source));
+    }
+    if matches!(language, "html" | "vue" | "svelte") {
         return web::Page::read(language, source)?.extract();
     }
     if language == "notebook" {
@@ -78,6 +98,7 @@ pub(super) fn parse(language: &str, path: &Path, source: &str) -> Result<ParsedF
         return Ok(rescript::parse(path, source));
     }
     let grammar = match language {
+        "powershell" => tree_sitter_powershell::LANGUAGE,
         "xslt" => tree_sitter_xml::LANGUAGE_XML,
         "r" => tree_sitter_r::LANGUAGE,
         "kotlin" => tree_sitter_kotlin_ng::LANGUAGE,
@@ -101,6 +122,7 @@ pub(super) fn parse(language: &str, path: &Path, source: &str) -> Result<ParsedF
     let root = tree.root_node();
     let test_file = crate::model::test_file(&path.to_string_lossy(), None);
     match language {
+        "powershell" => powershell::walk(root, source, &mut file, "", "<module>", test_file),
         "kotlin" => kotlin::walk(root, source, &mut file, "", "<module>", &Default::default()),
         "swift" => swift::walk(root, source, &mut file, "", "", "<module>", test_file),
         "xslt" => xslt::extract(root, source, &mut file),
@@ -131,7 +153,7 @@ pub(super) fn parse(language: &str, path: &Path, source: &str) -> Result<ParsedF
     Ok(file)
 }
 
-pub(super) fn declare(
+pub(in crate::parser) fn declare(
     file: &mut ParsedFile,
     node: Node<'_>,
     name: &str,

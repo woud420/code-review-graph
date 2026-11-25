@@ -29,7 +29,7 @@ pub(super) struct CallEvidence<'a> {
     root: &'a Path,
     file: &'a str,
     facts: &'a ParsedFile,
-    source: &'a Source,
+    source: &'a Source<'a>,
     paths: &'a BTreeSet<String>,
     returns: &'a ReturnIndex,
     sites: HashMap<(&'a str, usize, &'a str), &'a PythonReceiver>,
@@ -44,7 +44,7 @@ impl<'a> CallEvidence<'a> {
         root: &'a Path,
         file: &'a str,
         facts: &'a ParsedFile,
-        source: &'a Source,
+        source: &'a Source<'a>,
         paths: &'a BTreeSet<String>,
         returns: &'a ReturnIndex,
     ) -> Self {
@@ -304,7 +304,7 @@ impl<'a> CallEvidence<'a> {
         }
         if matches!(
             self.source.language,
-            "javascript" | "typescript" | "tsx" | "vue" | "html"
+            "javascript" | "typescript" | "tsx" | "vue" | "svelte" | "html"
         ) {
             let extra = self
                 .facts

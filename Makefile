@@ -43,6 +43,9 @@ parity:
 	"$(PYTHON)" -B rust/tests/php_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/lua_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/extended_languages_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
+	"$(PYTHON)" -B rust/tests/powershell_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
+	"$(PYTHON)" -B rust/tests/vbnet_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
+	"$(PYTHON)" -B rust/tests/robot_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/solidity_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/csharp_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/go_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
@@ -50,6 +53,7 @@ parity:
 	"$(PYTHON)" -B rust/tests/mcp_stdio.py "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/build_tool_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/submodule_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/unversioned_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/source_fixture_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/sql_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/hcl_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
@@ -76,6 +80,7 @@ parity:
 	"$(PYTHON)" -B rust/tests/watch_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/follow_symlinks_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/rust_project_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/language_coverage_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/visualize_parity.py --serve --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/history_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/config_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
@@ -119,3 +124,24 @@ SVG_TARGET_DIR ?= $(TARGET_DIR)/svg
 svg-parity:
 	cargo build --target-dir "$(SVG_TARGET_DIR)" --locked --features svg --bin code-review-graph
 	"$(PYTHON)" -B rust/tests/svg_parity.py --upstream "$(REFERENCE)" --binary "$(SVG_TARGET_DIR)/debug/code-review-graph" $(if $(SVG_REFERENCE_PACKAGES),--renderer-path "$(SVG_REFERENCE_PACKAGES)")
+
+.PHONY: upgrade-parity
+UPGRADE_WHEELS ?= $(TARGET_DIR)/upgrade-wheels
+upgrade-parity: parity-binary
+	"$(PYTHON)" -B rust/tests/upgrade_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --wheels "$(UPGRADE_WHEELS)"
+
+.PHONY: google-embedding-parity
+GOOGLE_TARGET_DIR ?= $(TARGET_DIR)/google-embeddings
+google-embedding-parity:
+	cargo build --target-dir "$(GOOGLE_TARGET_DIR)" --locked --features google-embeddings --bin code-review-graph
+	"$(PYTHON)" -B rust/tests/google_embedding_parity.py --upstream "$(REFERENCE)" --binary "$(GOOGLE_TARGET_DIR)/debug/code-review-graph" $(if $(GOOGLE_REFERENCE_PACKAGES),--sdk-path "$(GOOGLE_REFERENCE_PACKAGES)")
+
+.PHONY: minimax-parity
+minimax-parity:
+	"$(PYTHON)" -B rust/tests/minimax_parity.py --upstream "$(REFERENCE)"
+
+.PHONY: tokenizer-parity
+tokenizer-parity: parity-binary
+	cp "$(TARGET_DIR)/debug/code-review-graph" "$(PARITY_REPORT_DIR)/code-review-graph-default"
+	cargo build --locked --features tokenizer --bin code-review-graph
+	"$(PYTHON)" -B rust/tests/update_parity.py --upstream "$(REFERENCE)" --binary "$(PARITY_REPORT_DIR)/code-review-graph-default" --tokenizer-binary "$(TARGET_DIR)/debug/code-review-graph" $(if $(TOKENIZER_REFERENCE_PACKAGES),--tokenizer-pythonpath "$(TOKENIZER_REFERENCE_PACKAGES)") $(if $(TOKENIZER_VOCABULARY),--tokenizer-vocabulary "$(TOKENIZER_VOCABULARY)")

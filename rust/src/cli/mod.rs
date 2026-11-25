@@ -460,6 +460,7 @@ pub fn dispatch() -> Result<()> {
                 args.wait,
                 refresh,
                 canonical::Sources::Build {
+                    quiet: args.quiet,
                     follow: args.links.explicit(),
                     base,
                     recurse_submodules: None,

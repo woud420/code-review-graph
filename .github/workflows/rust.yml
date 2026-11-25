@@ -70,6 +70,12 @@ jobs:
           path: reference
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --project reference --python 3.12 --frozen --group dev
+      - name: Verify existing database upgrades
+        run: |
+          for version in 2.3.7 2.3.8 2.3.9; do
+            uv pip install --no-deps --python reference/.venv/bin/python --target "$RUNNER_TEMP/upgrade-wheels/$version" "code-review-graph==$version"
+          done
+          make upgrade-parity REFERENCE=reference PYTHON=reference/.venv/bin/python UPGRADE_WHEELS="$RUNNER_TEMP/upgrade-wheels"
       - run: make cutover REFERENCE=reference PYTHON=reference/.venv/bin/python
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
@@ -77,3 +83,46 @@ jobs:
           name: parity-reports
           path: target/parity/*.json
           if-no-files-found: warn
+
+  optional-compatibility:
+    name: Optional compatibility (${{ matrix.check }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [google, minimax, tokenizer, svg]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: tirth8205/code-review-graph
+          ref: 7ba9d17ab6fd281026b914d8da4c0dc98d013474
+          path: reference
+      - uses: astral-sh/setup-uv@v7
+      - name: Compare the native implementation with the pinned reference
+        env:
+          CHECK: ${{ matrix.check }}
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/optional-oracle
+        run: |
+          oracle="$UV_PROJECT_ENVIRONMENT/bin/python"
+          case "$CHECK" in
+            google)
+              uv sync --project reference --python 3.12 --frozen --extra google-embeddings
+              make google-embedding-parity REFERENCE=reference PYTHON="$oracle" GOOGLE_TARGET_DIR=target
+              ;;
+            minimax)
+              uv sync --project reference --python 3.12 --frozen
+              make minimax-parity REFERENCE=reference PYTHON="$oracle"
+              ;;
+            tokenizer)
+              uv sync --project reference --python 3.12 --frozen
+              uv pip install --python "$oracle" --target "$RUNNER_TEMP/tiktoken" 'tiktoken==0.14.0'
+              make tokenizer-parity REFERENCE=reference PYTHON="$oracle" TOKENIZER_REFERENCE_PACKAGES="$RUNNER_TEMP/tiktoken"
+              ;;
+            svg)
+              uv sync --project reference --python 3.12 --frozen --extra eval
+              uv export --project reference --frozen --all-extras --no-dev --no-emit-project --no-hashes --format requirements.txt | grep -E '^(scipy|numpy)==' > "$RUNNER_TEMP/svg-constraints.txt"
+              uv pip install --python "$oracle" --constraint "$RUNNER_TEMP/svg-constraints.txt" scipy
+              make svg-parity REFERENCE=reference PYTHON="$oracle" SVG_TARGET_DIR=target
+              ;;
+          esac

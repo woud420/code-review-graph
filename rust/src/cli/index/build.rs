@@ -61,6 +61,7 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
     };
     let db_path = store::database(root, None);
     let sources = canonical::Sources::Build {
+        quiet: false,
         follow: None,
         base: args["base"].as_str(),
         recurse_submodules: args["recurse_submodules"].as_bool(),

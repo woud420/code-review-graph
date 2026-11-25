@@ -136,3 +136,33 @@ pub(super) fn resolve(tx: &Transaction<'_>) -> Result<()> {
     }
     Ok(())
 }
+
+pub(super) fn settle_claims(tx: &Transaction<'_>) -> Result<()> {
+    for (kind, column, managed) in [
+        ("CALLS", "target_qualified", "bare_call_target"),
+        ("TESTED_BY", "source_qualified", "bare_tested_by_source"),
+    ] {
+        let mut select=tx.prepare(&format!("SELECT e.id,e.{column},json_extract(e.extra,'$.{managed}') FROM edges e
+            WHERE file_path GLOB '*.rs' AND kind=? AND {column} GLOB '/*::*' AND NOT EXISTS(SELECT 1 FROM nodes n WHERE n.qualified_name=e.{column})"))?;
+        let mut update=tx.prepare(&format!("UPDATE edges SET {column}=?1,extra=CASE WHEN ?2 THEN json_set(extra,'$.claimed_endpoint',{column}) ELSE extra END WHERE id=?3"))?;
+        let rows = select
+            .query_map([kind], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, endpoint, raw) in rows {
+            let leaf = endpoint.rsplit([':', '.']).next().unwrap_or("");
+            if !leaf.is_empty() {
+                update.execute(params![raw.as_deref().unwrap_or(leaf), raw.is_none(), id])?;
+            }
+        }
+        tx.execute(&format!("UPDATE edges SET {column}=CASE WHEN EXISTS (SELECT 1 FROM nodes WHERE qualified_name=json_extract(edges.extra,'$.claimed_endpoint')) THEN json_extract(extra,'$.claimed_endpoint') ELSE {column} END,
+            extra=json_remove(extra,'$.claimed_endpoint') WHERE kind=? AND file_path GLOB '*.rs' AND json_type(extra,'$.claimed_endpoint')='text'
+            AND EXISTS(SELECT 1 FROM nodes WHERE qualified_name IN (edges.{column},json_extract(edges.extra,'$.claimed_endpoint')))"),[kind])?;
+    }
+    Ok(())
+}

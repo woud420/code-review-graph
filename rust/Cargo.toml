@@ -22,6 +22,7 @@ name = "crg-daemon"
 path = "src/daemon_main.rs"
 
 [features]
+google-embeddings = []
 svg = []
 tokenizer = ["dep:tiktoken-rs"]
 
@@ -89,3 +90,4 @@ tree-sitter-objc = "3.0.2"
 tree-sitter-perl = "1.1.2"
 tree-sitter-html = "0.23.2"
 serde_yaml_ng = "0.10"
+tree-sitter-powershell = "0.26.6"

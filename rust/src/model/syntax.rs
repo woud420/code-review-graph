@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SyntaxFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_language: Option<String>,
     #[serde(default)]
     pub file: Value,
     #[serde(default)]

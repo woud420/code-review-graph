@@ -127,7 +127,10 @@ impl ImportDetails {
             .split_whitespace()
             .any(|name| Some(name) == raw.split('.').next());
         let mut matches = Vec::new();
-        for file in paths.iter().filter(|p| p.ends_with(".py")) {
+        for file in paths
+            .iter()
+            .filter(|p| crate::parser::has_extension(p, "py"))
+        {
             let path = Path::new(file);
             let stem = if path.ends_with("__init__.py") {
                 path.parent().map(Path::to_owned).unwrap_or_default()

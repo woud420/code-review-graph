@@ -13,6 +13,7 @@ pub(in crate::canonical) struct ExtraEdges {
     submodule_imports: Vec<(String, usize)>,
     implements: Vec<(String, String, usize)>,
     rust_imports: BTreeMap<String, String>,
+    rust_inline: BTreeSet<String>,
 }
 
 impl ExtraEdges {
@@ -118,6 +119,27 @@ impl ExtraEdges {
                         }
                     }
                 }
+                "mod_item" if node.parent() == Some(root) => {
+                    if let (Some(module), Some(body)) = (
+                        field(node, "name", source),
+                        node.child_by_field_name("body"),
+                    ) {
+                        let mut cursor = body.walk();
+                        for item in body.named_children(&mut cursor) {
+                            if matches!(
+                                item.kind(),
+                                "function_item"
+                                    | "function_signature_item"
+                                    | "enum_item"
+                                    | "trait_item"
+                                    | "struct_item"
+                            ) && let Some(name) = field(item, "name", source)
+                            {
+                                facts.rust_inline.insert(format!("{module}::{name}"));
+                            }
+                        }
+                    }
+                }
                 "impl_item" => {
                     if let (Some(ty), Some(tr)) = (
                         node.child_by_field_name("type"),
@@ -138,6 +160,57 @@ impl ExtraEdges {
             pending.extend(node.named_children(&mut c).map(|child| (child, owner)));
         }
         facts
+    }
+
+    pub(in crate::canonical) fn rust_scoped(
+        &self,
+        callee: &str,
+        project: Option<&rust::Project>,
+        path: &str,
+    ) -> Option<String> {
+        // Method receivers such as Builder::new().finish are expressions, not Rust paths.
+        if !callee.split("::").all(|part| {
+            !part.is_empty()
+                && part
+                    .trim_start_matches("r#")
+                    .chars()
+                    .all(|c| c == '_' || c.is_alphanumeric())
+        }) {
+            return None;
+        }
+        let (prefix, method) = callee.rsplit_once("::")?;
+        if prefix == "Self" {
+            return None;
+        }
+        if self.defined.contains(prefix) {
+            return Some(format!("{path}::{prefix}.{method}"));
+        }
+        if self.rust_inline.contains(callee) {
+            return Some(format!("{path}::{method}"));
+        }
+        let (first, rest) = prefix.split_once("::").unwrap_or((prefix, ""));
+        let expanded = if let Some(original) = self.rust_imports.get(first) {
+            if rest.is_empty() {
+                original.clone()
+            } else {
+                format!("{original}::{rest}")
+            }
+        } else {
+            prefix.to_owned()
+        };
+        project?.qualified_call(&expanded, method)
+    }
+
+    pub(in crate::canonical) fn rust_imported_call(
+        &self,
+        name: &str,
+        project: Option<&rust::Project>,
+    ) -> Option<String> {
+        if self.defined.contains(name) {
+            return None;
+        }
+        let file = project?.resolve(self.rust_imports.get(name)?)?;
+        Some(format!("{}::{name}", file.display()))
     }
 
     pub(in crate::canonical) fn direct_name(&self, name: &str) -> bool {

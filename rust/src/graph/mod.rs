@@ -160,6 +160,7 @@ impl Graph {
         let mut files_parsed = 0;
         let mut files_unchanged = 0;
         let mut dbt = crate::parser::sql::dbt::Projects::default();
+        let custom = crate::parser::custom::Registry::load(&root);
         for file in files {
             let bytes = fs::read(root.join(&file)).with_context(|| format!("reading {file}"))?;
             let hash = blake3::hash(&bytes).to_hex().to_string();
@@ -180,9 +181,12 @@ impl Graph {
                     continue;
                 }
             }
-            let source =
-                std::str::from_utf8(&bytes).with_context(|| format!("{file} is not UTF-8"))?;
-            let facts = (if sql {
+            let source = crate::parser::decode(path, &bytes)
+                .with_context(|| format!("{file} is not UTF-8"))?;
+            let source = source.as_ref();
+            let facts = (if let Some(facts) = custom.parse(path, source) {
+                facts
+            } else if sql {
                 crate::parser::sql::parse(path, source, membership)
             } else {
                 parse_file(path, source)
@@ -460,7 +464,7 @@ impl Resolver {
 
     fn imported_target(&self, file: &str, import: &Import, suffix: &str) -> Option<Target> {
         let member = member_name(&import.imported, suffix)?;
-        if !file.ends_with(".py") {
+        if !crate::parser::has_extension(file, "py") {
             return Some((self.module_path(file, &import.module)?, member));
         }
         let base = python_base(
@@ -714,16 +718,16 @@ impl Resolver {
                 .is_none()
                 .then(|| (file.into(), identity.clone()));
         }
-        if file.ends_with(".rs")
+        if crate::parser::has_extension(file, "rs")
             && let Some((class, method)) = name.rsplit_once("::")
         {
             return self.resolve_binding(file, &format!("{class}.{method}"), line);
         }
         if let Some(site) = self.modules[file].facts.syntax.site(caller, name, line) {
-            if file.ends_with(".php") {
+            if crate::parser::has_extension(file, "php") {
                 return self.php_call(file, site);
             }
-            if file.ends_with(".cs") {
+            if crate::parser::has_extension(file, "cs") {
                 return self.csharp_call(file, site);
             }
             return site
@@ -731,7 +735,7 @@ impl Resolver {
                 .as_ref()
                 .map(|target| (file.into(), target.clone()));
         }
-        if file.ends_with(".rs") && !name.contains(['.', ':']) {
+        if crate::parser::has_extension(file, "rs") && !name.contains(['.', ':']) {
             return self.resolve_binding(file, name, line).or_else(|| {
                 // Only bare calls left after checking local and imported names use the first matching method.
                 self.modules[file]
@@ -748,7 +752,7 @@ impl Resolver {
         if let Some(site) = self.modules[file].facts.cfamily.site(caller, name, line) {
             return site.target.as_ref().map(|n| (file.into(), n.clone()));
         }
-        if file.ends_with(".go") {
+        if crate::parser::has_extension(file, "go") {
             let module = &self.modules[file];
             if module
                 .facts
@@ -804,7 +808,7 @@ impl Resolver {
             return None;
         }
         // A nested definition shadows outer bindings. Sibling methods require a receiver.
-        if file.ends_with(".py") {
+        if crate::parser::has_extension(file, "py") {
             let module = &self.modules[file];
             if !name.contains('.')
                 && let Some(symbol) = module
@@ -933,7 +937,7 @@ fn resolve_graph(tx: &Transaction<'_>) -> Result<()> {
     let imports: Vec<_> = resolver
         .modules
         .iter()
-        .filter(|(file, _)| file.ends_with(".py"))
+        .filter(|(file, _)| crate::parser::has_extension(file, "py"))
         .map(|(file, module)| {
             let targets = module
                 .facts

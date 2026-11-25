@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod cache_upgrade;
-use anyhow::{Result, bail};
+pub mod migrate;
+use anyhow::{Result, bail, ensure};
 use rusqlite::{Connection, Error, OptionalExtension};
 use std::path::Path;
 
@@ -8,14 +9,7 @@ pub fn permissions(db: &Path) -> Result<()> {
     let Some(dir) = db.parent() else {
         return Ok(());
     };
-    if dir.metadata().is_ok_and(|m| m.permissions().readonly())
-        && !std::env::var("CRG_READ_ONLY").is_ok_and(|s| {
-            matches!(
-                s.trim().to_ascii_lowercase().as_str(),
-                "true" | "1" | "on" | "yes"
-            )
-        })
-    {
+    if dir.metadata().is_ok_and(|m| m.permissions().readonly()) && !super::read_only() {
         bail!(
             "Error: cannot open the graph database for writing at {} (attempt to write a readonly database). Check the permissions on {}, or set CRG_DATA_DIR to a writable directory.",
             db.display(),
@@ -71,6 +65,24 @@ pub fn validate(conn: &Connection, db: &Path) -> Result<()> {
                 "Error: the graph database at {} was written by a newer code-review-graph (schema v{version}; this build understands v15). This is code-review-graph 2.4.0 at {}. Upgrade this copy, or delete the file and run `code-review-graph build`. Your MCP entry and hooks may run a different copy: `code-review-graph doctor` lists each one and its version.",
                 db.display(),
                 exe.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn verify_owner(conn: &Connection, root: &Path) -> Result<()> {
+    if let Some(owner) = super::metadata(conn, "repo_root")? {
+        ensure!(
+            Path::new(&owner) == root,
+            "index belongs to another repository"
+        );
+    } else {
+        let mut files = conn.prepare("SELECT file_path FROM nodes WHERE kind='File'")?;
+        for row in files.query_map([], |row| row.get::<_, String>(0))? {
+            ensure!(
+                Path::new(&row?).starts_with(root),
+                "index belongs to another repository"
             );
         }
     }

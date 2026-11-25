@@ -106,22 +106,21 @@ fn matches(root: &Path, stored: &BTreeSet<String>, patterns: &[String]) -> Resul
     Ok(selected.into_iter().collect())
 }
 
-pub(super) fn migrate_legacy(root: &Path, database: &Path) -> Result<()> {
+pub(super) fn migrate_legacy(root: &Path, database: &Path, quiet: bool) -> Result<()> {
     let old = root.join(".code-review-graph.db");
     if database != root.join(".code-review-graph/graph.db") || database.exists() || !old.is_file() {
         return Ok(());
     }
-    let original = Connection::open_with_flags(&old, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let mut original = Connection::open_with_flags(&old, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    super::database::validate(&original, &old)?;
+    let tx = original.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::database::verify_owner(&tx, root)?;
+    super::database::migrate::upgrade(&tx, quiet)?;
     ensure!(
-        metadata(&original, "schema_version")?.as_deref() == Some("15"),
+        metadata(&tx, "schema_version")?.as_deref() == Some("15"),
         "unsupported graph schema"
     );
-    ensure!(
-        metadata(&original, "repo_root")?
-            .as_deref()
-            .is_none_or(|s| Path::new(s) == root),
-        "index belongs to another repository"
-    );
+    tx.commit()?;
     let busy = original.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
         r.get::<_, i64>(0)
     })?;
@@ -158,7 +157,7 @@ pub fn run(
         )?)
     };
     if !preview {
-        migrate_legacy(root, database)?;
+        migrate_legacy(root, database, false)?;
     }
     let mut db = Connection::open_with_flags(
         if preview && legacy { &old } else { database },
@@ -192,6 +191,7 @@ pub fn run(
     if report.files.is_empty() || preview {
         return Ok(report);
     }
+    super::database::migrate::upgrade(&tx, false)?;
     let foreign = metadata(&tx, "schema_version")?;
     ensure!(foreign.as_deref() == Some("15"), "unsupported graph schema");
     begin_edges(&tx)?;
@@ -225,6 +225,7 @@ pub fn run(
         graph.sync_matching(root, true, |p| retained.contains(p))?;
         let staging = graph.connection();
         let writer = Writer {
+            rust_modules: Default::default(),
             hcl: super::hcl::Modules::load(root, staging)?,
             root,
             staging,
@@ -252,10 +253,7 @@ pub fn run(
                 "source changed while indexing: {relative}"
             );
             let facts: ParsedFile = serde_json::from_str(&raw)?;
-            let mut source = Source::parse(path, std::str::from_utf8(&bytes)?)?;
-            if facts.cfamily.language == "cpp" {
-                source.language = "cpp";
-            }
+            let source = Source::from_snapshot(path, &bytes, &facts)?;
             tx.execute("INSERT INTO affected VALUES(?)", [&referrer])?;
             tx.execute("DELETE FROM nodes WHERE file_path=?", [&referrer])?;
             writer.materialize_file(

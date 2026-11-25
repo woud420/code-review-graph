@@ -295,6 +295,7 @@ fn compute(tx: &Transaction<'_>, stages: Stages, full: bool) -> Result<Report> {
         report.bare_edges_resolved = resolve_bare(tx, &entities)?;
         report.cpp_scoped_edges_resolved = cpp::scoped_calls(tx, &entities)?;
     }
+    rust::settle_claims(tx)?;
     tx.execute_batch(include_str!("certainty.sql"))?;
     if !stages.resolve {
         return Ok(report);
@@ -384,16 +385,12 @@ pub fn rerun_with_embeddings(
         super::set_metadata(&tx, "schema_version", "15")?;
         super::set_metadata(&tx, "repo_root", root.to_str().context("non UTF-8 root")?)?;
     } else {
+        super::database::verify_owner(&tx, root)?;
+        super::database::migrate::upgrade(&tx, false)?;
         ensure!(
             super::metadata(&tx, "schema_version")?.as_deref() == Some("15"),
             "unsupported graph schema"
         );
-        if let Some(owner) = super::metadata(&tx, "repo_root")? {
-            ensure!(
-                std::path::Path::new(&owner) == root,
-                "index belongs to another repository"
-            );
-        }
     }
     let incomplete = super::metadata(&tx, "build_state")?.as_deref() == Some("in-progress");
     let computed = compute(

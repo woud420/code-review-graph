@@ -16,10 +16,10 @@ pub(super) struct Declaration {
     pub decorators: Vec<String>,
 }
 
-pub(super) struct Source {
+pub(super) struct Source<'a> {
     pub import_details: super::imports::ImportDetails,
     pub extra_edges: extra_edges::ExtraEdges,
-    pub language: &'static str,
+    pub language: &'a str,
     pub lines: usize,
     pub declarations: BTreeMap<(usize, String), Declaration>,
     pub imports: BTreeSet<(usize, String)>,
@@ -34,7 +34,7 @@ fn field<'a>(node: Node<'_>, name: &str, source: &'a str) -> Option<&'a str> {
         .map(|value| text(value, source))
 }
 
-impl Source {
+impl<'a> Source<'a> {
     pub fn claimed_call(
         &self,
         root: &Path,
@@ -93,14 +93,48 @@ impl Source {
         Some((binding.imported.clone(), claimed))
     }
 
+    pub(super) fn from_snapshot(
+        path: &Path,
+        bytes: &[u8],
+        facts: &'a crate::model::ParsedFile,
+    ) -> Result<Self> {
+        let text = crate::parser::decode(path, bytes)?;
+        if let Some(custom) = &facts.syntax.custom_language {
+            return Ok(Self::plain(custom, &text));
+        }
+        let mut source = Self::parse(path, &text)?;
+        if facts.cfamily.language == "cpp" {
+            source.language = "cpp";
+        }
+        Ok(source)
+    }
+    fn plain(language: &'a str, source: &str) -> Self {
+        let lines = if language == "robot" {
+            source.lines().count().max(1)
+        } else {
+            source.bytes().filter(|&b| b == b'\n').count() + 1
+        };
+        Self {
+            language,
+            lines,
+            declarations: Default::default(),
+            imports: Default::default(),
+            extra_edges: Default::default(),
+            import_details: Default::default(),
+        }
+    }
     pub fn parse(path: &Path, source: &str) -> Result<Self> {
+        let normalized = crate::parser::normalized_path(path);
+        let path = normalized.as_ref();
         if let Some(language) = crate::parser::extensions::web::language(path) {
             let page = crate::parser::extensions::web::Page::read(language, source)?;
             let mut parsed = Self::parse(page.script_path(), page.source())?;
             parsed.language = language;
             return Ok(parsed);
         }
-        let language = if crate::parser::extensions::notebook::export(path, source) {
+        let language = if crate::parser::extensions::blade::matches(path) {
+            Some("blade")
+        } else if crate::parser::extensions::notebook::export(path, source) {
             Some("notebook")
         } else if crate::parser::bash::supports(path, source.as_bytes()) {
             Some("bash")
@@ -126,21 +160,13 @@ impl Source {
             }
         };
         if let Some(language) = language {
-            return Ok(Self {
-                language,
-                lines: source.lines().count()
-                    + usize::from(source.is_empty() || source.ends_with('\n')),
-                declarations: Default::default(),
-                imports: Default::default(),
-                extra_edges: Default::default(),
-                import_details: Default::default(),
-            });
+            return Ok(Self::plain(language, source));
         }
         let (language, grammar) = match path.extension().and_then(|ext| ext.to_str()) {
             Some("py") => ("python", tree_sitter_python::LANGUAGE),
             Some("rs") => ("rust", tree_sitter_rust::LANGUAGE),
             Some("tsx") => ("tsx", tree_sitter_typescript::LANGUAGE_TSX),
-            Some("ts" | "cts" | "mts") => {
+            Some("ts" | "cts" | "mts" | "astro") => {
                 ("typescript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT)
             }
             Some("js" | "jsx" | "mjs" | "cjs") => ("javascript", tree_sitter_javascript::LANGUAGE),

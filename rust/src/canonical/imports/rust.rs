@@ -144,7 +144,11 @@ impl Layout {
     }
 }
 
-pub(crate) struct Project {
+#[derive(Default)]
+pub(crate) struct ModuleCache(std::cell::RefCell<BTreeMap<(PathBuf, String), Option<PathBuf>>>);
+
+pub(crate) struct Project<'a> {
+    cache: &'a ModuleCache,
     boundary: PathBuf,
     caller: PathBuf,
     layout: Layout,
@@ -160,8 +164,8 @@ fn manifest(dir: &Path) -> Option<Value> {
     toml::from_str(&source).ok()
 }
 
-impl Project {
-    pub(crate) fn load(root: &Path, caller: &Path) -> Option<Self> {
+impl<'a> Project<'a> {
+    pub(crate) fn load(root: &Path, caller: &Path, cache: &'a ModuleCache) -> Option<Self> {
         let caller = root.join(caller).canonicalize().ok()?;
         if !caller.starts_with(root) {
             return None;
@@ -220,6 +224,7 @@ impl Project {
             }
         }
         Some(Self {
+            cache,
             boundary: root.to_owned(),
             caller,
             layout,
@@ -227,7 +232,32 @@ impl Project {
         })
     }
 
+    pub(crate) fn qualified_call(&self, prefix: &str, method: &str) -> Option<String> {
+        let file = self.resolve(prefix)?;
+        if let Some((parent, last)) = prefix.rsplit_once("::")
+            && !matches!(last, "crate" | "self" | "super")
+            && self.resolve(parent).as_ref() == Some(&file)
+        {
+            return Some(format!("{}::{last}.{method}", file.display()));
+        }
+        Some(format!("{}::{method}", file.display()))
+    }
+
     pub(crate) fn resolve(&self, module: &str) -> Option<PathBuf> {
+        // The reference shares module lookups between files in the same directory for one parse run.
+        let key = (self.caller.parent()?.to_owned(), module.to_owned());
+        if let Some(cached) = self.cache.0.borrow().get(&key) {
+            return cached.clone();
+        }
+        let found = self.resolve_uncached(module);
+        let mut entries = self.cache.0.borrow_mut();
+        if entries.len() >= 15_000 {
+            entries.clear();
+        }
+        entries.insert(key, found.clone());
+        found
+    }
+    fn resolve_uncached(&self, module: &str) -> Option<PathBuf> {
         let mut input = module.split("::").filter(|s| !s.is_empty()).peekable();
         let anchor = *input.peek()?;
         let mut layout = &self.layout;

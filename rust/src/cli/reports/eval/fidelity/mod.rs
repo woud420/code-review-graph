@@ -132,6 +132,7 @@ impl Scratch {
             false,
             None,
             Sources::Build {
+                quiet: true,
                 follow: None,
                 base: Some(base),
                 recurse_submodules: None,

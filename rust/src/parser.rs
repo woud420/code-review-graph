@@ -1,7 +1,9 @@
+#[path = "parser/extensions/scripting/bash.rs"]
 pub(crate) mod bash;
 pub(crate) mod cfamily;
 mod config;
 mod csharp;
+pub(crate) mod custom;
 pub(crate) mod extensions;
 pub(crate) mod go;
 use config::{hcl, json};
@@ -25,7 +27,34 @@ use crate::model::ParsedFile;
 
 mod python;
 
+pub(crate) fn has_extension(path: &str, extension: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+}
+
+pub(crate) fn normalized_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && ext.bytes().any(|c| c.is_ascii_uppercase())
+    {
+        return path.with_extension(ext.to_ascii_lowercase()).into();
+    }
+    path.into()
+}
+
+pub(crate) fn decode<'a>(path: &Path, bytes: &'a [u8]) -> Result<std::borrow::Cow<'a, str>> {
+    if extensions::blade::matches(path) {
+        return Ok(String::from_utf8_lossy(bytes));
+    }
+    Ok(std::str::from_utf8(bytes)?.into())
+}
+
 pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
+    let normalized = normalized_path(path);
+    let path = normalized.as_ref();
+    if extensions::blade::matches(path) {
+        return extensions::parse("blade", path, source);
+    }
     if let Some(language) = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -53,7 +82,7 @@ pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
         Some("go") => tree_sitter_go::LANGUAGE,
         Some("py") => tree_sitter_python::LANGUAGE,
         Some("rs") => tree_sitter_rust::LANGUAGE,
-        Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts") => {
+        Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "astro") => {
             return crate::parser::typescript::parse_typescript(path, source);
         }
         _ if crate::parser::bash::supports(path, source.as_bytes()) => tree_sitter_bash::LANGUAGE,
