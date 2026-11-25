@@ -74,6 +74,9 @@ impl Source {
             Some("bash")
         } else {
             match path.extension().and_then(|s| s.to_str()) {
+                Some(ext) if crate::parser::extensions::language(ext).is_some() => {
+                    crate::parser::extensions::language(ext)
+                }
                 Some("rb") => Some("ruby"),
                 Some("tf" | "hcl") => Some("hcl"),
                 Some("yaml" | "yml" | "properties") => Some("yaml"),

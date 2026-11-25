@@ -55,8 +55,8 @@ def pinned_reference(source):
         raise ValueError(f"reference package, documentation or manifest differs from {UPSTREAM_REV}")
 
 
-def run(command, cwd, env):
-    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, encoding="utf-8", timeout=45)
+def run(command, cwd, env, stdin=None):
+    result = subprocess.run(command, cwd=cwd, env=env, input=stdin, capture_output=True, encoding="utf-8", timeout=45)
     return {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
 
@@ -148,6 +148,24 @@ def saved_graph(command, repo, env, extended):
     outputs = {name: run(command + [*args, "--repo", str(repo)], repo, env) for name, args in cases.items()}
     if extended:
         outputs["eval/report"] = run([*command, "eval", "--report"], repo, env)
+        for name, argv in {
+            "install": ["install","--platform","claude","--dry-run"],
+            "init": ["init","--platform","codex","--dry-run"],
+            "uninstall": ["uninstall","--platform","claude","--dry-run","--yes"],
+            "embed": ["embed","--provider","openai"],
+        }.items():
+            outputs[name+"/cli"] = run([*command,*argv,"--repo",str(repo)],repo,env)
+        for name, argv, payload in [
+            ("hook-status", ["hook-status"], {"cwd":str(repo)}),
+            ("hook-update", ["hook-update","--existing-only"], {"cwd":str(repo/"absent")}),
+            ("enrich", ["enrich"], {"tool_name":"Read","tool_input":{"file_path":str(repo/"lib.ts")},"cwd":str(repo)}),
+        ]:
+            hook_env = env.copy()
+            if name == "hook-status":
+                # Upstream launches its installed console entry point by name.
+                exe = Path(command[0])
+                hook_env["PATH"] = str(exe.parent) + os.pathsep + hook_env["PATH"]
+            outputs[name+"/event"]=run([*command,*argv],repo,hook_env,json.dumps(payload))
     return outputs
 
 
@@ -286,6 +304,12 @@ def capture(args, temp):
                CRG_HOME=str(temp / "registry"),
                PYTHONPATH=str(source), PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1",
                PYTHONHASHSEED="0")
+    home = temp / "client-home"
+    home.mkdir()
+    env.update(HOME=str(home),USERPROFILE=str(home),CODEX_HOME=str(home/".codex"),HERMES_HOME=str(home/".hermes"),
+               XDG_CONFIG_HOME=str(home/".config"),XDG_CACHE_HOME=str(home/".cache"),XDG_DATA_HOME=str(home/".local/share"))
+    for key in ("GOOGLE_API_KEY","MINIMAX_API_KEY","VOYAGE_API_KEY"):
+        env.pop(key,None)
     candidate_env = env.copy()
     del candidate_env["PYTHONPATH"]
     repo = temp / "fixture"
@@ -362,7 +386,7 @@ def capture(args, temp):
     tested_commands = {"build", "query", "update", "status", "search", "serve"}
     if args.cutover:
         tested_commands.update(argv[0] for argv in REVIEW_COMMANDS.values())
-        tested_commands.add("eval")
+        tested_commands.update({"eval","install","init","uninstall","embed","enrich","hook-status","hook-update"})
     daemon_paths = {p.removeprefix("daemon ") for p in tree if p.startswith("daemon ")}
     covered_daemon = set()
     if args.cutover:

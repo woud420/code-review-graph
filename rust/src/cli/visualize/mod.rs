@@ -1,4 +1,5 @@
 mod data;
+mod export;
 mod group;
 use super::{query::text, wire};
 use anyhow::Result;
@@ -89,7 +90,7 @@ pub(super) fn write(
     mode: &str,
     sidecar: bool,
 ) -> Result<()> {
-    if format != "html" && (sidecar || mode != "auto") {
+    if format != "html" && sidecar {
         eprintln!(
             "visualize: {} has no effect on --format {format}",
             if sidecar { "--sidecar" } else { "--mode" }
@@ -98,14 +99,23 @@ pub(super) fn write(
     }
     let path = db.with_file_name(format!("graph.{format}"));
     let mut data = data::read(conn)?;
+    if format == "obsidian" {
+        return export::obsidian(&db.with_file_name("obsidian"), &data);
+    }
     if format != "html" {
         let body = match format {
             "json" => format!("{}\n", serde_json::to_string_pretty(&data)?),
             "graphml" => graphml(&data)?,
+            "cypher" => export::cypher(&data)?,
             _ => unreachable!(),
         };
         save(&path, body.as_bytes())?;
-        let label = if format == "json" { "JSON" } else { "GraphML" };
+        let label = match format {
+            "json" => "JSON",
+            "graphml" => "GraphML",
+            "cypher" => "Neo4j Cypher",
+            _ => unreachable!(),
+        };
         if format == "json" {
             eprintln!("INFO: {label} exported to {}", path.display());
         } else {

@@ -1,8 +1,9 @@
 mod args;
 mod build;
 mod changes;
-mod eval;
-mod history;
+use reports::{eval, history};
+mod hooks;
+mod install;
 mod mcp;
 mod query;
 mod registry;
@@ -52,6 +53,9 @@ pub fn dispatch() -> Result<()> {
         return Ok(());
     };
     match command {
+        Command::Install(options) => install::run(options),
+        Command::Uninstall(options) => install::unbind(options),
+        Command::Readonly { args } => std::process::exit(install::readonly(&args)?),
         Command::Eval { report, output_dir } => {
             if report {
                 eval::report(&output_dir)
@@ -110,6 +114,9 @@ pub fn dispatch() -> Result<()> {
             let db = store::database(&root, location.data_dir.as_deref());
             history::print(db.with_file_name("context-history.jsonl"), &by, days, json)
         }
+        Command::HookUpdate { existing_only } => hooks::update(existing_only),
+        Command::HookStatus => hooks::status(),
+        Command::Enrich => hooks::search_hook(),
         Command::Repos => registry::print(),
         Command::Register { path, alias } => registry::register(&path, alias),
         Command::Unregister { path_or_alias } => registry::unregister(&path_or_alias),
@@ -336,6 +343,33 @@ pub fn dispatch() -> Result<()> {
             let path = store::database(&root, location.data_dir.as_deref());
             build::forget_cli(&root, &path, &paths, dry_run, wait)
         }
+        Command::Embed {
+            location,
+            provider,
+            model,
+            wait,
+        } => {
+            let root = root(location.repo.as_deref(), false)?;
+            let db = if location.data_dir.is_some() {
+                write_path(&root, location.data_dir.as_deref())?
+            } else {
+                store::database(&root, None)
+            };
+            let result = build::embed(&root, &db, provider.as_deref(), model.as_deref(), wait)?;
+            if result["status"] == "contended" {
+                eprintln!(
+                    "Skipped: {}",
+                    result["summary"].as_str().unwrap_or_default()
+                );
+                std::process::exit(75);
+            }
+            if result["status"] == "error" {
+                eprintln!("ERROR: {}", result["error"].as_str().unwrap_or_default());
+                std::process::exit(1);
+            }
+            println!("{}", result["summary"].as_str().unwrap_or_default());
+            Ok(())
+        }
         Command::Postprocess {
             location,
             no_flows,
@@ -379,7 +413,19 @@ pub fn dispatch() -> Result<()> {
             };
             let db = write_path(&root, args.location.data_dir.as_deref())?;
             let new_db = !db.exists();
-            let report = match canonical::index(&root, &db, full, level, args.wait) {
+            if args.embedding_provider.is_some() != args.embedding_model.is_some() {
+                eprintln!(
+                    "usage: code-review-graph [-h] [-v] <command> ...\ncode-review-graph: error: --embedding-provider and --embedding-model must be supplied together"
+                );
+                std::process::exit(2);
+            }
+            let refresh = args
+                .embedding_provider
+                .as_deref()
+                .zip(args.embedding_model.as_deref());
+            let report = match canonical::index_with_embeddings(
+                &root, &db, full, level, args.wait, refresh,
+            ) {
                 Err(error)
                     if error
                         .downcast_ref::<std::io::Error>()
@@ -399,17 +445,17 @@ pub fn dispatch() -> Result<()> {
                 }
                 other => other?,
             };
+            if !full
+                && !report.full
+                && !root
+                    .ancestors()
+                    .any(|dir| dir.join(".git").exists() || dir.join(".svn").exists())
+            {
+                eprintln!("WARNING: git status failed while discovering working-tree files");
+            }
             if !args.quiet {
                 if new_db {
                     eprintln!("INFO: Created graph database (schema v15).");
-                }
-                if !full
-                    && !report.full
-                    && !root
-                        .ancestors()
-                        .any(|dir| dir.join(".git").exists() || dir.join(".svn").exists())
-                {
-                    eprintln!("WARNING: git status failed while discovering working-tree files");
                 }
                 if report.full {
                     let total = report.files_parsed;
@@ -483,6 +529,7 @@ pub fn dispatch() -> Result<()> {
                     );
                 }
             }
+            build::log_refresh(&report.embeddings);
             Ok(())
         }
     }

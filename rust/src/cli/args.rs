@@ -26,6 +26,11 @@ pub struct Location {
 
 #[derive(Args)]
 pub struct Write {
+    #[arg(long,value_parser=["local","openai","google","minimax","voyage"])]
+    pub embedding_provider: Option<String>,
+    #[arg(long)]
+    pub embedding_model: Option<String>,
+
     #[command(flatten)]
     pub location: Location,
     #[arg(short, long)]
@@ -43,6 +48,36 @@ pub struct Write {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Register the native graph server, hooks and skills.
+    #[command(visible_alias = "init")]
+    Install(super::install::Options),
+    /// Remove a platform's graph server registration.
+    Uninstall(super::install::Uninstall),
+    #[command(hide = true)]
+    Readonly {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
+    /// Compute vector embeddings for semantic search.
+    Embed {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long,value_parser=["local","openai","google","minimax","voyage"])]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        wait: bool,
+    },
+    #[command(hide = true)]
+    HookUpdate {
+        #[arg(long)]
+        existing_only: bool,
+    },
+    #[command(hide = true)]
+    HookStatus,
+    #[command(hide = true)]
+    Enrich,
     /// List registered repositories.
     Repos,
     /// Register a local repository.
@@ -88,7 +123,7 @@ pub enum Command {
         location: Location,
         #[arg(long,default_value="auto",value_parser=["auto","full","community","file"])]
         mode: String,
-        #[arg(long,default_value="html",value_parser=["html","json","graphml"])]
+        #[arg(long,default_value="html",value_parser=["html","json","graphml","cypher","obsidian"])]
         format: String,
         #[arg(long)]
         sidecar: bool,

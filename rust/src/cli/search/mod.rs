@@ -135,7 +135,7 @@ fn expressions(query: &str) -> Vec<String> {
 
 type Ranked = Vec<(i64, f64)>;
 
-fn fts(
+pub(super) fn fts(
     conn: &Connection,
     query: &str,
     kind: Option<&str>,
@@ -402,17 +402,39 @@ pub(super) fn ranked_with_ids(
             hits.sort_by(|a, b| b.1.total_cmp(&a.1));
         }
     }
-    let mode = if hits.is_empty() {
+    let vectors = code_review_graph_rs::canonical::embeddings::rank(
+        conn,
+        query,
+        options.provider.as_deref(),
+        options.model.as_deref(),
+        kind,
+        fetch as usize,
+    )
+    .unwrap_or_else(|err| {
+        eprintln!("WARNING: Embedding search failed: {err}");
+        vec![]
+    });
+    let mode = if hits.is_empty() && vectors.is_empty() {
         hits = keyword(conn, query, kind, fetch)?;
         if hits.is_empty() {
             return Ok(("none", vec![]));
         }
         "keyword"
     } else {
-        for (rank, (_, score)) in hits.iter_mut().enumerate() {
-            *score = 1.0 / (61 + rank) as f64;
+        let mode = match (hits.is_empty(), vectors.is_empty()) {
+            (false, false) => "hybrid",
+            (true, false) => "semantic",
+            _ => "fts",
+        };
+        let mut merged = indexmap::IndexMap::<i64, f64>::new();
+        for ranked in [hits, vectors] {
+            for (rank, (id, _)) in ranked.into_iter().enumerate() {
+                *merged.entry(id).or_default() += 1.0 / (61 + rank) as f64;
+            }
         }
-        "fts"
+        hits = merged.into_iter().collect();
+        hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+        mode
     };
     let mut get=conn.prepare("SELECT name,qualified_name,kind,file_path,line_start,line_end,COALESCE(language,''),params,return_type,signature,COALESCE(symbol,''),is_test FROM nodes WHERE id=?")?;
     let mut results = Vec::new();

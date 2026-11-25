@@ -320,6 +320,7 @@ fn compute(tx: &Transaction<'_>, stages: Stages, full: bool) -> Result<Report> {
 }
 
 pub struct StandaloneReport {
+    pub embeddings: super::embeddings::Refresh,
     pub computed: Report,
     pub incomplete: bool,
     pub new_db: bool,
@@ -332,6 +333,18 @@ pub fn rerun(
     communities: bool,
     fts: bool,
     wait: bool,
+) -> Result<StandaloneReport> {
+    rerun_with_embeddings(path, root, flows, communities, fts, wait, None)
+}
+
+pub fn rerun_with_embeddings(
+    path: &std::path::Path,
+    root: &std::path::Path,
+    flows: bool,
+    communities: bool,
+    fts: bool,
+    wait: bool,
+    request: Option<(&str, &str)>,
 ) -> Result<StandaloneReport> {
     use anyhow::{Context, ensure};
     super::ensure_writable(path)?;
@@ -378,6 +391,7 @@ pub fn rerun(
     }
     tx.commit()?;
     Ok(StandaloneReport {
+        embeddings: super::embeddings::refresh(&mut db, request),
         computed,
         incomplete,
         new_db,

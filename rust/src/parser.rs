@@ -2,6 +2,7 @@ pub(crate) mod bash;
 pub(crate) mod cfamily;
 mod config;
 mod csharp;
+pub(crate) mod extensions;
 pub(crate) mod go;
 use config::{hcl, json};
 mod java;
@@ -24,6 +25,13 @@ use crate::model::{Call, ParsedFile};
 mod python;
 
 pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
+    if let Some(language) = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(extensions::language)
+    {
+        return extensions::parse(language, path, source);
+    }
     let grammar = match path.extension().and_then(|ext| ext.to_str()) {
         Some("rb") => return ruby::parse(path, source),
         Some("tf" | "hcl") => return hcl::parse(source),

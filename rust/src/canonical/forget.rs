@@ -106,6 +106,31 @@ fn matches(root: &Path, stored: &BTreeSet<String>, patterns: &[String]) -> Resul
     Ok(selected.into_iter().collect())
 }
 
+pub(super) fn migrate_legacy(root: &Path, database: &Path) -> Result<()> {
+    let old = root.join(".code-review-graph.db");
+    if database != root.join(".code-review-graph/graph.db") || database.exists() || !old.is_file() {
+        return Ok(());
+    }
+    let original = Connection::open_with_flags(&old, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    ensure!(
+        metadata(&original, "schema_version")?.as_deref() == Some("15"),
+        "unsupported graph schema"
+    );
+    ensure!(
+        metadata(&original, "repo_root")?
+            .as_deref()
+            .is_none_or(|s| Path::new(s) == root),
+        "index belongs to another repository"
+    );
+    let busy = original.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+        r.get::<_, i64>(0)
+    })?;
+    ensure!(busy == 0, "legacy graph has an active writer");
+    drop(original);
+    fs::rename(&old, database)?;
+    Ok(())
+}
+
 pub fn run(
     root: &Path,
     database: &Path,
@@ -132,24 +157,8 @@ pub fn run(
             wait,
         )?)
     };
-    if legacy && !preview && !database.exists() {
-        let original = Connection::open_with_flags(&old, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        ensure!(
-            metadata(&original, "schema_version")?.as_deref() == Some("15"),
-            "unsupported graph schema"
-        );
-        ensure!(
-            metadata(&original, "repo_root")?
-                .as_deref()
-                .is_none_or(|s| Path::new(s) == root),
-            "index belongs to another repository"
-        );
-        let busy = original.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-            r.get::<_, i64>(0)
-        })?;
-        ensure!(busy == 0, "legacy graph has an active writer");
-        drop(original);
-        fs::rename(&old, database)?;
+    if !preview {
+        migrate_legacy(root, database)?;
     }
     let mut db = Connection::open_with_flags(
         if preview && legacy { &old } else { database },

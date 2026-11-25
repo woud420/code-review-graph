@@ -56,6 +56,21 @@ fn call(
         None => root.to_owned(),
     };
     let data = Value::Object(args);
+    if name == "embed_graph_tool" {
+        let db = store::database(&root, None);
+        return with_provenance(
+            super::build::embed(
+                &root,
+                &db,
+                data["provider"].as_str(),
+                data["model"].as_str(),
+                data["wait_for_lock"].as_bool().unwrap_or(false),
+            )
+            .map_err(|e| anyhow!("Error calling tool '{name}': {e}"))?,
+            &db,
+            &root,
+        );
+    }
     if name == "apply_refactor_tool" {
         return with_provenance(
             hints.apply_refactor(&root, &data)?,

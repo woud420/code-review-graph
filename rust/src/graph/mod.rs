@@ -355,6 +355,7 @@ fn source_files(root: &Path) -> Result<Vec<String>> {
                 ext,
                 "py" | "rs" | "go" | "java" | "cs" | "sol" | "lua" | "luau" | "php"
             )
+            || crate::parser::extensions::language(ext).is_some()
             || json
             || crate::parser::cfamily::supports(ext)
             || crate::parser::bash::discover(path)

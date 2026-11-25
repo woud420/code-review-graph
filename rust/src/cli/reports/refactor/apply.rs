@@ -1,5 +1,5 @@
-mod diff;
 use super::*;
+use crate::cli::wire::diff;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Component, PathBuf};

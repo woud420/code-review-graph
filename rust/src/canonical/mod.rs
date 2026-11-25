@@ -2,6 +2,7 @@
 mod cache_upgrade;
 mod csharp;
 mod docs;
+pub mod embeddings;
 mod evidence;
 pub mod forget;
 mod hcl;
@@ -37,6 +38,7 @@ pub struct IndexReport {
     pub edges: i64,
     pub files: i64,
     pub postprocess: postprocess::Report,
+    pub embeddings: embeddings::Refresh,
 }
 
 const INDEX_VERSION: &str = "2";
@@ -144,11 +146,23 @@ pub fn index(
     level: postprocess::Level,
     wait: bool,
 ) -> Result<IndexReport> {
+    index_with_embeddings(root, path, full, level, wait, None)
+}
+
+pub fn index_with_embeddings(
+    root: &Path,
+    path: &Path,
+    full: bool,
+    level: postprocess::Level,
+    wait: bool,
+    request: Option<(&str, &str)>,
+) -> Result<IndexReport> {
     ensure_writable(path)?;
     let root = root.canonicalize()?;
     let dir = path.parent().context("missing graph directory")?;
     fs::create_dir_all(dir)?;
     let _lock = WriteLock::acquire(dir, wait)?;
+    forget::migrate_legacy(&root, path)?;
     let mut db = Connection::open(path)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let empty = tx.query_row(
@@ -170,7 +184,7 @@ pub fn index(
             let other_language: Option<String> = tx
                 .query_row(
                     "SELECT language FROM nodes WHERE kind='File' AND coalesce(language,'') NOT IN
-                ('python','rust','javascript','typescript','tsx','bash','json','go','c','cpp','sql','hcl','ruby','yaml','java','csharp','solidity','lua','luau','php') LIMIT 1",
+                ('python','rust','javascript','typescript','tsx','bash','json','go','c','cpp','sql','hcl','ruby','yaml','java','csharp','solidity','lua','luau','php','r','nix','zig','kotlin','swift','xslt','rescript') LIMIT 1",
                     [],
                     |r| r.get(0),
                 )
@@ -179,13 +193,6 @@ pub fn index(
                 other_language.is_none(),
                 "this graph contains a language the native writer cannot update: {}",
                 other_language.unwrap_or_default()
-            );
-            let has_embeddings = tx.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='embeddings')", [], |r|r.get::<_,bool>(0))?;
-            ensure!(
-                !has_embeddings
-                    || !tx.query_row("SELECT EXISTS(SELECT 1 FROM embeddings)", [], |r| r
-                        .get::<_, bool>(0))?,
-                "this graph contains embeddings that require an embedding-aware writer"
             );
         } else {
             match metadata(&tx, "rust_index_version")?.as_deref() {
@@ -196,7 +203,10 @@ pub fn index(
         }
         let owner = metadata(&tx, "repo_root")?;
         ensure!(
-            owner.as_deref() == root.to_str(),
+            owner.as_deref() == root.to_str()
+                || (owner.is_none()
+                    && !tx.query_row("SELECT EXISTS(SELECT 1 FROM nodes)", [], |r| r
+                        .get::<_, bool>(0))?),
             "index belongs to another repository"
         );
     }
@@ -326,7 +336,8 @@ pub fn index(
     } else {
         postprocess::Report::default()
     };
-    let report = IndexReport {
+    let mut report = IndexReport {
+        embeddings: embeddings::Refresh::NotRequested,
         base: if full { None } else { base },
         interrupted,
         changed_files,
@@ -341,6 +352,7 @@ pub fn index(
         edges: tx.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?,
     };
     tx.commit()?;
+    report.embeddings = embeddings::refresh(&mut db, request);
     Ok(report)
 }
 
@@ -490,7 +502,7 @@ fn replace_edges(tx: &Transaction) -> Result<()> {
     tx.execute_batch("DELETE FROM edges WHERE file_path IN (SELECT file FROM affected);
             INSERT OR IGNORE INTO imported(kind,source,target,path,line,extra)
                 SELECT 'TESTED_BY',e.target,e.source,e.path,e.line,e.extra FROM imported e
-                JOIN nodes n ON n.qualified_name=e.source WHERE e.kind='CALLS' AND n.kind='Test';
+                JOIN nodes n ON n.qualified_name=e.source WHERE e.kind='CALLS' AND n.kind='Test' AND (n.language!='rescript' OR EXISTS(SELECT 1 FROM nodes f WHERE f.qualified_name=e.path AND f.is_test));
             INSERT INTO edges(kind,source_qualified,target_qualified,file_path,line,target_resolution,extra,updated_at)
                 SELECT kind,source,target,path,line,resolution,extra,unixepoch('subsec') FROM imported ORDER BY rowid")?;
     Ok(())
@@ -541,7 +553,11 @@ impl Writer<'_> {
             digests.insert(relative.as_str(), sha);
         }
         let deleted = old.len();
+        let remove_vectors = deleted > 0 && embeddings::has_table(tx)?;
         for path in old.keys() {
+            if remove_vectors {
+                tx.execute("DELETE FROM embeddings WHERE qualified_name IN(SELECT qualified_name FROM nodes WHERE file_path=?)",[path])?;
+            }
             tx.execute("INSERT INTO affected VALUES(?)", [path])?;
             tx.execute("DELETE FROM nodes WHERE file_path=?", [path])?;
         }
@@ -654,7 +670,11 @@ impl Writer<'_> {
                 .rsplit_once('.')
                 .map_or((None, identity), |(p, n)| (Some(p), n));
             let json = facts.json.paths.get(&symbol.name);
-            let (parent, name) = if json.is_some() {
+            let (parent, name) = if let Some(name) = facts.syntax.display_names.get(&symbol.name) {
+                (None, name.as_str())
+            } else if source.language == "nix" {
+                (None, identity)
+            } else if json.is_some() {
                 (None, symbol.name.strip_prefix("json:").unwrap_or(name))
             } else {
                 (parent, name)
@@ -737,7 +757,12 @@ impl Writer<'_> {
             } else if let Some(c) = cc {
                 c.container.as_deref()
             } else {
-                json.and_then(|p| p.parent.as_deref())
+                facts
+                    .syntax
+                    .containers
+                    .get(&symbol.name)
+                    .map(String::as_str)
+                    .or_else(|| json.and_then(|p| p.parent.as_deref()))
                     .or_else(|| {
                         facts
                             .typescript
@@ -756,15 +781,17 @@ impl Writer<'_> {
             })
             .map(|p| qualified(path, p))
             .unwrap_or_else(|| path.to_owned());
-            edge(
-                tx,
-                "CONTAINS",
-                &container,
-                &qn,
-                path,
-                symbol.start_line,
-                None,
-            )?;
+            if source.language != "rescript" || (parent.is_some() && symbol.kind != "Class") {
+                edge(
+                    tx,
+                    "CONTAINS",
+                    &container,
+                    &qn,
+                    path,
+                    symbol.start_line,
+                    None,
+                )?;
+            }
             if let Some(d) = cc {
                 for base in &d.bases {
                     edge(tx, "INHERITS", &qn, base, path, symbol.start_line, None)?;
@@ -806,6 +833,21 @@ impl Writer<'_> {
             import_edge(tx, path, &target, *line, &extra)?;
         }
         for e in &facts.syntax.edges {
+            let relative_import = e.kind == "IMPORTS_FROM"
+                && (matches!(source.language, "nix" | "xslt")
+                    || (source.language == "zig" && e.target.ends_with(".zig")));
+            let local = relative_import
+                .then(|| full_path.parent()?.join(&e.target).canonicalize().ok())
+                .flatten()
+                .filter(|p| {
+                    p.is_file()
+                        && (source.language != "xslt"
+                            || p.strip_prefix(root)
+                                .ok()
+                                .and_then(Path::to_str)
+                                .is_some_and(|r| paths.contains(r)))
+                })
+                .map(|p| p.to_string_lossy().into_owned());
             let php = (source.language == "php" && e.kind == "IMPORTS_FROM")
                 .then(|| {
                     crate::parser::php::imports::local_file(root, relative, &e.target, |p| {
@@ -815,7 +857,7 @@ impl Writer<'_> {
                 .flatten()
                 .map(|f| root.join(f).to_string_lossy().into_owned());
             tx.prepare_cached("INSERT INTO imported(kind,source,target,path,line,extra) VALUES(?,?,?,?,?,?) ON CONFLICT(kind,source,target,path,line) DO UPDATE SET extra=excluded.extra")?
-                .execute(params![e.kind, qualified(path,&e.owner), php.as_deref().unwrap_or(&e.target), path, e.line as i64, e.extra.to_string()])?;
+                .execute(params![e.kind, qualified(path,&e.owner), php.as_deref().or(local.as_deref()).unwrap_or(&e.target), path, e.line as i64, e.extra.to_string()])?;
         }
         for (line, module) in &facts.cfamily.imports {
             edge(tx, "IMPORTS_FROM", path, module, path, *line, None)?;
@@ -922,7 +964,11 @@ impl Writer<'_> {
                 if let Some((_, target)) = &claim {
                     extra["claimed_endpoint"] = serde_json::json!(target);
                 }
-                let bare = extra["csharp_raw_target"].as_str().unwrap_or(bare);
+                let bare = if matches!(source.language, "xslt" | "r" | "rescript") {
+                    call.callee.as_str()
+                } else {
+                    extra["csharp_raw_target"].as_str().unwrap_or(bare)
+                };
                 write_call.execute(params![
                     qualified(path, &call.caller),
                     bare,

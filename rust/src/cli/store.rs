@@ -220,7 +220,10 @@ pub fn tool_stats(conn: &Connection, root: &Path) -> Result<Value> {
     for (kind, n) in &stats.edge_kinds {
         summary.push_str(&format!("\n  {kind}: {n}"));
     }
-    summary.push_str(&format!("\n\nCALLS by target resolution: {direct} direct, {unresolved} unresolved\n\nEmbeddings: {embedded} nodes embedded\n  (install sentence-transformers for semantic search)"));
+    summary.push_str(&format!("\n\nCALLS by target resolution: {direct} direct, {unresolved} unresolved\n\nEmbeddings: {embedded} nodes embedded"));
+    if !code_review_graph_rs::canonical::embeddings::available()? {
+        summary.push_str("\n  (install sentence-transformers for semantic search)");
+    }
     Ok(
         json!({"status":"ok","summary":summary,"total_nodes":stats.nodes(),"total_edges":stats.edges(),"nodes_by_kind":stats.node_kinds,"edges_by_kind":stats.edge_kinds,
         "calls_by_resolution":{"direct":direct,"unresolved":unresolved},"languages":stats.languages,"files_count":stats.files(),"last_updated":stats.updated,"embeddings_count":embedded}),

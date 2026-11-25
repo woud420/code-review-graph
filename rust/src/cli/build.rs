@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::path::Path;
 
-fn contended(db_path: &Path, outcome: &str) -> Value {
+pub(super) fn contended(db_path: &Path, outcome: &str) -> Value {
     let lock = db_path.with_file_name("write.lock");
     let pid = std::fs::read_to_string(&lock)
         .ok()
@@ -67,12 +67,13 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
         other => anyhow::bail!("invalid postprocess level: {other}"),
     };
     let db_path = store::database(root, None);
-    let result = match canonical::index(
+    let result = match canonical::index_with_embeddings(
         root,
         &db_path,
         args["full_rebuild"].as_bool().unwrap_or(false),
         level,
         false,
+        refresh_request(args),
     ) {
         Err(e) if e.to_string() == "another writer is using this graph" => {
             return Ok(contended(&db_path, "skipped instead of repeating the work"));
@@ -147,11 +148,9 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
         }
         report["postprocess_timing"] = timing;
     }
-    if args["embedding_provider"].is_string() && args["embedding_model"].is_string() {
-        report["embeddings_refresh_skipped"] = true.into();
-        report["warnings"] = json!([
-            "Embedding refresh skipped: this graph has no embeddings yet. Run `code-review-graph embed` (MCP: embed_graph_tool) once with the same provider and model to create them."
-        ]);
+    let messages = refresh_result(&mut report, &result.embeddings, args, false);
+    if !messages.is_empty() {
+        report["warnings"] = json!(messages);
     }
     if !(no_change && level == Level::None) {
         report["repaired_interrupted_build"] = result.interrupted.into();
@@ -170,13 +169,14 @@ pub(super) fn postprocess(
     verbose: bool,
 ) -> Result<Value> {
     let included = |name: &str| args[name].as_bool().unwrap_or(true);
-    let result = match canonical::postprocess::rerun(
+    let result = match canonical::postprocess::rerun_with_embeddings(
         db,
         root,
         included("flows"),
         included("communities"),
         included("fts"),
         wait,
+        refresh_request(args),
     ) {
         Err(e) if e.to_string() == "another writer is using this graph" => {
             return Ok(contended(db, "skipped instead of repeating the work"));
@@ -205,27 +205,12 @@ pub(super) fn postprocess(
             );
         }
     }
-    let mut warnings = Vec::new();
-    match (
-        args["embedding_model"].as_str(),
-        args["embedding_provider"].as_str(),
-    ) {
-        (None, None) => {}
-        (Some(_), Some(_)) => {
-            let conn = store::open(db)?;
-            let embedded = store::embedding_count(&conn)? > 0;
-            if embedded {
-                warnings
-                    .push("Embedding refresh requires a provider supported by the native binary.");
-            } else {
-                report["embeddings_refresh_skipped"] = true.into();
-                warnings.push(ABSENT_EMBEDDINGS);
-            }
-        }
-        _ => warnings.push("Embedding refresh requires both an explicit provider and model."),
-    }
+    let mut warnings = refresh_result(&mut report, &result.embeddings, args, verbose);
     if result.incomplete {
-        warnings.push(INCOMPLETE);
+        warnings.push(INCOMPLETE.into());
+        if verbose {
+            eprintln!("WARNING: {INCOMPLETE}");
+        }
         report["build_incomplete"] = true.into();
         report["status"] = "partial".into();
         report["summary"] = "Post-processing ran, but the graph is missing files from an unfinished build. Run a full build to repair it.".into();
@@ -233,11 +218,6 @@ pub(super) fn postprocess(
         report["summary"] = "Post-processing complete.".into();
     }
     if !warnings.is_empty() {
-        if verbose {
-            for warning in &warnings {
-                eprintln!("WARNING: {warning}");
-            }
-        }
         report["warnings"] = json!(warnings);
     }
     Ok(report)
@@ -346,4 +326,83 @@ pub(super) fn forget_cli(
         }
     }
     Ok(())
+}
+
+pub fn embed(
+    root: &Path,
+    db: &Path,
+    provider: Option<&str>,
+    model: Option<&str>,
+    wait: bool,
+) -> Result<Value> {
+    ensure!(
+        root.is_dir(),
+        "repo_root is not an existing directory: {}",
+        root.display()
+    );
+    ensure!(
+        [".git", ".svn", ".code-review-graph"]
+            .iter()
+            .any(|marker| root.join(marker).exists()),
+        "repo_root does not look like a project root (no .git, .svn, or .code-review-graph directory found): {}",
+        root.display()
+    );
+    match canonical::embeddings::write(db, provider, model, wait, |conn| {
+        store::check_root(conn, db, root)
+    }) {
+        Err(e) if e.to_string() == "another writer is using this graph" => {
+            Ok(contended(db, "nothing was embedded"))
+        }
+        result => result,
+    }
+}
+
+fn refresh_request(args: &Value) -> Option<(&str, &str)> {
+    args["embedding_provider"]
+        .as_str()
+        .zip(args["embedding_model"].as_str())
+}
+pub(super) fn refresh_result(
+    report: &mut Value,
+    outcome: &canonical::embeddings::Refresh,
+    args: &Value,
+    verbose: bool,
+) -> Vec<String> {
+    use canonical::embeddings::Refresh;
+    let message = match outcome {
+        Refresh::NotRequested
+            if args["embedding_provider"].is_string() != args["embedding_model"].is_string() =>
+        {
+            let warning = "Embedding refresh requires both an explicit provider and model.";
+            if verbose {
+                eprintln!("WARNING: {warning}");
+            }
+            warning.into()
+        }
+        Refresh::NotRequested => return vec![],
+        Refresh::Updated { embedded, purged } => {
+            report["embeddings_refreshed"] = json!(embedded);
+            report["embeddings_purged"] = json!(purged);
+            return vec![];
+        }
+        Refresh::Empty => {
+            report["embeddings_refresh_skipped"] = json!(true);
+            ABSENT_EMBEDDINGS.into()
+        }
+        Refresh::Failed { class, reason } => format!("Embedding refresh failed: {class}: {reason}"),
+    };
+    if verbose {
+        log_refresh(outcome);
+    }
+    vec![message]
+}
+
+pub(super) fn log_refresh(outcome: &canonical::embeddings::Refresh) {
+    match outcome {
+        canonical::embeddings::Refresh::Empty => eprintln!("WARNING: {ABSENT_EMBEDDINGS}"),
+        canonical::embeddings::Refresh::Failed { reason, .. } => {
+            eprintln!("WARNING: Embedding refresh failed: {reason}")
+        }
+        _ => (),
+    }
 }

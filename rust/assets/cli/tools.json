@@ -579,6 +579,67 @@
       }
     },
     "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Compute vector embeddings for all graph nodes to enable semantic search.\n\nAfterwards semantic_search_nodes_tool ranks by vector similarity instead\nof keyword matching. Changing the model or provider re-embeds every node.\nThe local provider needs: pip install \"code-review-graph[embeddings]\".",
+    "inputSchema": {
+      "properties": {
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repository root path. Auto-detected if omitted."
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Embedding model. Local: a HuggingFace ID or path (default\n   all-MiniLM-L6-v2); openai / google / voyage: that provider's\n   model ID. Falls back to CRG_EMBEDDING_MODEL, CRG_OPENAI_MODEL\n   or CRG_VOYAGE_MODEL."
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "\"local\" (default), \"openai\", \"google\", \"minimax\", or\n      \"voyage\". \"openai\" accepts any OpenAI-compatible endpoint\n      and needs CRG_OPENAI_BASE_URL + CRG_OPENAI_API_KEY;\n      \"voyage\" needs VOYAGE_API_KEY."
+        }
+      },
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "embed_graph_tool",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "title": "Embed Graph Tool"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      }
+    },
+    "annotations": {
       "readOnlyHint": true
     },
     "description": "Get aggregate statistics about the code knowledge graph.\n\nShows total nodes, edges, languages, files, and last update time.\nUseful for checking if the graph is built and up to date.",

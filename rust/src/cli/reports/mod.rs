@@ -3,6 +3,8 @@ mod analysis;
 mod architecture;
 pub(super) mod context;
 pub(super) mod detect;
+pub(super) mod eval;
+pub(super) mod history;
 mod impact;
 mod refactor;
 pub(super) use refactor::dead_code;

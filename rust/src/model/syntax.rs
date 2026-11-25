@@ -6,6 +6,10 @@ use std::collections::BTreeMap;
 pub struct SyntaxFacts {
     #[serde(default)]
     pub file: Value,
+    #[serde(default)]
+    pub display_names: BTreeMap<String, String>,
+    #[serde(default)]
+    pub containers: BTreeMap<String, String>,
     pub declarations: BTreeMap<String, Definition>,
     pub edges: Vec<Edge>,
     pub sites: BTreeMap<usize, Vec<Site>>,

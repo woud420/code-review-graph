@@ -15,7 +15,7 @@ const TIMESTAMP: &str = "%Y-%m-%dT%H:%M:%SZ";
 
 thread_local! { static LABEL: Cell<Option<&'static str>> = const { Cell::new(None) }; }
 
-pub(super) fn with_label<T>(label: Option<&'static str>, report: impl FnOnce() -> T) -> T {
+pub(in crate::cli) fn with_label<T>(label: Option<&'static str>, report: impl FnOnce() -> T) -> T {
     let previous = LABEL.replace(label);
     let result = report();
     LABEL.set(previous);
@@ -58,7 +58,7 @@ fn append(dir: &Path, entry: Value) -> io::Result<()> {
     options().append(true).open(path)?.write_all(&line)
 }
 
-pub(super) fn record(
+pub(in crate::cli) fn record(
     conn: &rusqlite::Connection,
     tool: &str,
     mode: &str,
@@ -179,7 +179,12 @@ impl Entry {
     }
 }
 
-pub(super) fn print(path: PathBuf, by: &str, days: Option<u32>, as_json: bool) -> Result<()> {
+pub(in crate::cli) fn print(
+    path: PathBuf,
+    by: &str,
+    days: Option<u32>,
+    as_json: bool,
+) -> Result<()> {
     let cutoff = days
         .and_then(|d| {
             now()
@@ -234,7 +239,7 @@ pub(super) fn print(path: PathBuf, by: &str, days: Option<u32>, as_json: bool) -
     if as_json {
         println!(
             "{}",
-            super::wire::json_text(
+            crate::cli::wire::json_text(
                 &json!({"log":path,"recording":recording,"by":by,"days":days,"rows":rows,"total":total,"skipped_lines":skipped}),
                 true
             )

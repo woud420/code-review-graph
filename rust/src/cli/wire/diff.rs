@@ -97,7 +97,7 @@ fn range(start: usize, len: usize) -> String {
         _ => format!("{},{}", start + 1, len),
     }
 }
-pub(super) fn unified(path: &str, before: &str, after: &str) -> String {
+pub(in crate::cli) fn unified(path: &str, before: &str, after: &str) -> String {
     if before == after {
         return String::new();
     }

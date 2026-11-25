@@ -1,3 +1,4 @@
+pub(super) mod diff;
 use serde_json::Value;
 use std::fmt::Write;
 

@@ -330,7 +330,7 @@ fn average(values: &[f64]) -> String {
     }
 }
 
-pub(super) fn report(results: &Path) -> Result<()> {
+pub(in crate::cli) fn report(results: &Path) -> Result<()> {
     let data = Report::read(results)?;
     let content = data.full()?;
     let report = Path::new("evaluate/reports/summary.md");

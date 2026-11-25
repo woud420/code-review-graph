@@ -11,6 +11,8 @@ target/release/code-review-graph query callers_of my_function --repo /absolute/p
 target/release/code-review-graph serve --repo /absolute/path/to/project
 ```
 
+The native CI job builds and packages the CLI and `crg-daemon` on Linux and macOS. Its downloadable archives contain both executables. The Cargo package includes the Rust source and bundled assets needed to build them.
+
 The public binary reads the upstream v15 SQLite format. To try a fresh native index alongside an existing one, set `CRG_DATA_DIR` to a separate directory for every command in the session. The public writer uses a second file in that directory to cache parsed facts. Writes use the upstream `write.lock`, and a failed update rolls back its changes to the public graph.
 
 Use `--skip-flows` for a build with signatures and text search. Use `--skip-postprocess` for the raw graph. For MCP over stdio, configure the executable as the command with arguments `["serve", "--repo", "/absolute/path/to/project"]`. Its tool list reports the operations currently implemented.
@@ -35,6 +37,10 @@ make cutover REFERENCE=../crg-reference PYTHON=../crg-reference/.venv/bin/python
 - `make fixture-parity` compares independently built graphs across the full upstream multilingual fixture directory, including languages that Rust cannot index yet.
 - `make cutover` runs every comparison and returns a failing status while any comparison or coverage requirement fails. The public and database reports are written to `target/parity/` by default. GitHub Actions runs the same replacement gate independently of its native build job.
 
-Native indexing includes Python, Rust, JavaScript, TypeScript, TSX, shell, JSON, Go, C, C++, Java, C#, SQL, YAML, Terraform, Solidity, Lua, Luau, PHP and Ruby. The strict graph comparison covers every file in the pinned upstream Python package. The wider fixture and public behavior reports track open differences, including unsupported languages, installers and optional integrations. Keep Python available for those workflows until the replacement gate passes.
+Native indexing includes Python, Rust, JavaScript, TypeScript, TSX, shell, JSON, Go, C, C++, Java, C#, SQL, YAML, Terraform, Solidity, Lua, Luau, PHP, Ruby, Swift, Kotlin, Zig, R, Nix, ReScript and XSLT. The strict graph comparison covers every file in the pinned upstream Python package. The wider fixture and public behavior reports track open differences, including unsupported languages, installers and optional integrations. Keep Python available for those workflows until the replacement gate passes.
+
+For Claude Code and Codex, `install --platform claude` and `install --platform codex` write the path to the native executable into the MCP config. Run `--dry-run` to preview the changes. Their launcher and hook paths intentionally differ from a Python installation. The installer comparison starts both installed servers and checks the resulting config, Markdown, hooks, reruns and scoped uninstall in temporary homes.
+
+The embedding comparison uses local HTTP servers for the OpenAI-compatible and Voyage formats. Optional local transformer inference and Google model inference are outside that comparison.
 
 For an architecture check, run `deslop-please` at the workspace root with `rust-analyzer` on the executable search path.

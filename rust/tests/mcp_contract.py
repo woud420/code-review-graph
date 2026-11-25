@@ -40,6 +40,7 @@ REVIEW_CASES = {
     "isolated-registry": ("list_repos_tool", {}),
     "traverse-bfs": ("traverse_graph_tool", {"query": "target", "mode": "bfs", "depth": 2}),
     "dead-code": ("refactor_tool", {"mode": "dead_code", "max_results": 1}),
+    "invalid-embedding-provider": ("embed_graph_tool", {"provider": "not-a-provider"}),
     "absent-refactor": ("apply_refactor_tool", {"refactor_id": "missing-preview", "dry_run": True}),
 }
 
