@@ -238,7 +238,16 @@ impl Provider {
                     "Voyage"
                 }
                 #[cfg(feature = "google-embeddings")]
-                Api::Google => return google::vectors(self, texts, query),
+                Api::Google => {
+                    return google::vectors(
+                        &self.http,
+                        &self.base,
+                        &self.key,
+                        &self.model,
+                        texts,
+                        query,
+                    );
+                }
                 Api::MiniMax => {
                     return minimax::vectors(&self.post_embeddings(), &self.model, texts, query);
                 }

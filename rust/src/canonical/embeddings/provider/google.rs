@@ -1,4 +1,3 @@
-use super::Provider;
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -13,14 +12,20 @@ struct Embedding {
     values: Vec<f64>,
 }
 
-pub(super) fn vectors(provider: &Provider, texts: &[String], query: bool) -> Result<Vec<Vec<f64>>> {
-    let model = &provider.model;
+pub(super) fn vectors(
+    http: &ureq::Agent,
+    base: &url::Url,
+    key: &str,
+    model: &str,
+    texts: &[String],
+    query: bool,
+) -> Result<Vec<Vec<f64>>> {
     ensure!(
         !model.contains("..") && !model.contains(['?', '&']),
         "invalid model parameter."
     );
     let model = if model.starts_with("models/") || model.starts_with("tunedModels/") {
-        model.clone()
+        model.to_owned()
     } else {
         format!("models/{model}")
     };
@@ -31,16 +36,15 @@ pub(super) fn vectors(provider: &Provider, texts: &[String], query: bool) -> Res
     };
     let endpoint = format!(
         "{}/v1beta/{model}:batchEmbedContents",
-        provider.base.as_str().trim_end_matches('/')
+        base.as_str().trim_end_matches('/')
     );
     let mut out = Vec::new();
     for batch in texts.chunks(100) {
         let requests=batch.iter().map(|text|json!({"model":model,"content":{"parts":[{"text":text}],"role":"user"},"taskType":task})).collect::<Vec<_>>();
         for attempt in 0..3 {
-            match provider
-                .http
+            match http
                 .post(&endpoint)
-                .set("x-goog-api-key", &provider.key)
+                .set("x-goog-api-key", key)
                 .set("Accept", "application/json")
                 .send_json(json!({"requests":requests}))
             {

@@ -59,7 +59,7 @@ pub struct IndexReport {
     pub embeddings: embeddings::Refresh,
 }
 
-const INDEX_VERSION: &str = "3";
+const INDEX_VERSION: &str = "4";
 
 pub(crate) fn read_only() -> bool {
     std::env::var("CRG_READ_ONLY").is_ok_and(|s| {
@@ -256,7 +256,7 @@ pub fn index_sources(
             }
         } else {
             match metadata(&tx, "rust_index_version")?.as_deref() {
-                Some("1" | "2") => upgrade = true,
+                Some("1" | "2" | "3") => upgrade = true,
                 Some(INDEX_VERSION) => {}
                 _ => anyhow::bail!("unsupported native index version"),
             }
@@ -431,11 +431,12 @@ pub fn index_sources(
     let mut changed_files = Vec::new();
     let mut dependent_files = Vec::new();
     let mut communities_affected = false;
+    let mut hcl_counts = hcl::Counts::default();
     let mut parsed = 0;
     let mut deleted = 0;
     let mut changed = false;
     if full || metadata(&tx, "rust_source_manifest")?.as_deref() != Some(&manifest) {
-        (parsed, deleted, communities_affected) = writer.apply(&tx, &files, full)?;
+        (parsed, deleted, communities_affected, hcl_counts) = writer.apply(&tx, &files, full)?;
         if !full {
             for (output, sql) in [
                 (
@@ -512,11 +513,12 @@ pub fn index_sources(
     } else {
         level
     };
-    let postprocess = if changed || effective_level != postprocess::Level::None {
+    let mut postprocess = if changed || effective_level != postprocess::Level::None {
         postprocess::process(&tx, effective_level, full)?
     } else {
         postprocess::Report::default()
     };
+    postprocess.hcl = hcl_counts;
     // The watcher refreshes derived rows outside the explicit build lifecycle.
     if matches!(sources, Sources::Watching(..)) {
         if let Some(state) = &previous_state {
@@ -688,7 +690,7 @@ struct Writer<'a> {
 
 fn begin_edges(tx: &Transaction) -> Result<()> {
     tx.execute_batch("CREATE TEMP TABLE affected(file TEXT PRIMARY KEY);
-            CREATE TEMP TABLE imported(kind TEXT,source TEXT,target TEXT,path TEXT,line INTEGER,resolution TEXT,extra TEXT DEFAULT '{}',
+            CREATE TEMP TABLE imported(kind TEXT,source TEXT,target TEXT,path TEXT,line INTEGER,resolution TEXT,extra TEXT DEFAULT '{}', hcl_rebound INTEGER DEFAULT 0,
                 PRIMARY KEY(kind,source,target,path,line))")?;
     Ok(())
 }
@@ -712,7 +714,7 @@ impl Writer<'_> {
         tx: &Transaction<'_>,
         files: &BTreeMap<String, (String, String)>,
         full: bool,
-    ) -> Result<(usize, usize, bool)> {
+    ) -> Result<(usize, usize, bool, hcl::Counts)> {
         begin_edges(tx)?;
         let mut communities_affected = false;
         let mut old = file_hashes(tx)?;
@@ -775,6 +777,11 @@ impl Writer<'_> {
                 AND EXISTS(SELECT 1 FROM original_changes WHERE file LIKE '%/tsconfig.json' OR file LIKE '%/jsconfig.json')")?;
         }
         if !full {
+            tx.execute_batch("INSERT OR IGNORE INTO affected
+                SELECT e.file_path FROM original_changes c JOIN edges e INDEXED BY idx_edges_target_kind
+                  ON e.target_qualified >= c.file || '::' AND e.target_qualified < c.file || ':;'
+                WHERE lower(c.file) GLOB '*.java' AND e.kind='CALLS' AND
+                  (json_extract(e.extra,'$.aop_resolved')=1 OR json_extract(e.extra,'$.spring_event_resolved')=1)")?;
             self.hcl.affected(tx)?;
             tx.execute_batch(
                 "INSERT OR IGNORE INTO affected SELECT DISTINCT e.file_path FROM edges e
@@ -788,7 +795,7 @@ impl Writer<'_> {
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         if affected.is_empty() {
-            return Ok((0, deleted, deleted > 0));
+            return Ok((0, deleted, deleted > 0, hcl::Counts::default()));
         }
         if full
             && !self
@@ -816,6 +823,7 @@ impl Writer<'_> {
             let source = Source::from_snapshot(Path::new(relative), &data, &facts)?;
             self.materialize_file(tx, relative, &facts, &source, &digests[relative], &returns)?;
         }
+        let hcl_counts = self.hcl.counts(tx, full)?;
         replace_edges(tx)?;
         for path in old.keys() {
             tx.execute("DELETE FROM edges WHERE kind='IMPORTS_FROM' AND target_qualified=? AND json_extract(extra,'$.robot_setting')='resource'", [path])?;
@@ -836,6 +844,7 @@ impl Writer<'_> {
             if full { files.len() } else { affected.len() },
             deleted,
             communities_affected || deleted > 0,
+            hcl_counts,
         ))
     }
 

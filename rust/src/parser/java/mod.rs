@@ -1,5 +1,6 @@
 mod annotations;
 mod calls;
+mod events;
 
 use crate::model::{
     ParsedFile, Symbol,
@@ -143,6 +144,7 @@ impl Input<'_> {
                     },
                 );
                 self.method_metadata(n, class, &identity, &mut extra);
+                self.events(n, &identity, &mut extra);
             }
             if let Some(kind) = kind {
                 let decorators = annotations::decorators(n, s);

@@ -17,7 +17,11 @@ pub(in crate::cli) fn contended(db_path: &Path, outcome: &str) -> Value {
                 "summary":format!("Another code-review-graph write is already running for this repository ({holder}); {outcome}. Pass wait_for_lock=True (CLI: --wait) to block until it finishes.")})
 }
 
-fn full_resolvers(report: &mut Value, db: &Connection) -> Result<()> {
+fn full_resolvers(
+    report: &mut Value,
+    db: &Connection,
+    post: &canonical::postprocess::Report,
+) -> Result<()> {
     let files = |language: &str| {
         db.query_row(
             "SELECT count(*) FROM nodes WHERE kind='File' AND language=?",
@@ -32,16 +36,14 @@ fn full_resolvers(report: &mut Value, db: &Connection) -> Result<()> {
     let resolved = imports("repository_suffix")?;
     let ambiguous = imports("ambiguous")?;
     report["python_resolution"] = json!({"files_indexed":files("python")?,"imports_updated":resolved+ambiguous+imports("unresolved")?,"imports_resolved":resolved,"imports_ambiguous":ambiguous});
-    report["rescript_resolution"] =
-        json!({"files_indexed":files("rescript")?,"calls_resolved":0,"imports_resolved":0});
-    report["spring_resolution"] = json!({"files_indexed":files("java")?,"calls_resolved":0});
+    report["rescript_resolution"] = json!(post.rescript);
+    report["spring_resolution"] = json!(post.spring);
     report["aop_resolution"] =
         json!({"aspects_indexed":0,"advice_resolved":0,"calls_created":0,"stale_calls_removed":0});
     report["event_resolution"] =
         json!({"events_indexed":0,"calls_emitted":0,"stale_calls_removed":0});
-    report["temporal_resolution"] = json!({"files_indexed":files("java")?,"calls_resolved":0});
-    report["hcl_resolution"] =
-        json!({"files_indexed":files("hcl")?,"references_resolved":0,"imports_resolved":0});
+    report["temporal_resolution"] = json!(post.temporal);
+    report["hcl_resolution"] = json!({"files_indexed":files("hcl")?,"references_resolved":post.hcl.references_resolved,"imports_resolved":post.hcl.imports_resolved});
     report["scoped_resolution"] = json!({"files_indexed":files("rust")?+files("php")?+files("csharp")?,"calls_resolved":count("SELECT count(*) FROM edges WHERE kind='CALLS' AND json_type(extra,'$.scoped_resolved') IS NOT NULL")?});
     report["jedi_enrichment"] = json!({"skipped":true,"reason":"not requested"});
     Ok(())
@@ -104,7 +106,7 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
         value
     };
     if result.full {
-        full_resolvers(&mut report, &db)?;
+        full_resolvers(&mut report, &db, &result.postprocess)?;
     } else if !result.changed_files.is_empty() || result.freshness_advanced || !no_change {
         let mut available = json!({});
         let updated = result
@@ -132,7 +134,7 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
                         && (name != "jedi_enrichment" || root.join(p).is_file())
                 });
             if relevant && available.as_object().is_some_and(|o| o.is_empty()) {
-                full_resolvers(&mut available, &db)?;
+                full_resolvers(&mut available, &db, &result.postprocess)?;
             }
             report[name] = if relevant {
                 available[name].take()
@@ -140,6 +142,9 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
                 Value::Null
             };
         }
+    }
+    if let Some(event) = &result.postprocess.event {
+        report["event_resolution"] = json!(event);
     }
     report["status"] = "ok".into();
     report["build_type"] = if result.full { "full" } else { "incremental" }.into();
@@ -157,6 +162,9 @@ pub fn run(root: &Path, args: &Value) -> Result<Value> {
     }
     .into();
     let post = &result.postprocess;
+    if !report["aop_resolution"].is_null() {
+        report["aop_resolution"] = json!(&post.aop);
+    }
     if result.effective_level != Level::None {
         if !no_change || result.interrupted {
             report["bare_edges_resolved"] = post.bare_edges_resolved.into();

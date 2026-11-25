@@ -6,7 +6,7 @@ use std::fs;
 
 #[test]
 fn upgrade_rebuilds_matching_hashes_and_retries_after_a_parse_failure() -> Result<()> {
-    for (index_version, legacy_cache) in [("1", 1), ("1", 2), ("2", 3)] {
+    for (index_version, legacy_cache) in [("1", 1), ("1", 2), ("2", 3), ("3", 4)] {
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
         let db = root.join(".code-review-graph/graph.db");
@@ -83,7 +83,7 @@ fn proof_index_recovers_old_parser_facts_on_incremental_update() -> Result<()> {
     let old = Connection::open(&db)?;
     old.execute("DELETE FROM calls", [])?;
     old.execute("UPDATE files SET facts='{}'", [])?;
-    old.pragma_update(None, "user_version", 3)?;
+    old.pragma_update(None, "user_version", 4)?;
     assert!(graph.callees("example.py::outer")?.is_empty());
     assert_eq!(graph.sync(&root, false)?.files_parsed, 1);
     assert_eq!(graph.callees("example.py::outer")?[0].name, "target");

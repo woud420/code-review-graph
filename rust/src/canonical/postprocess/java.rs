@@ -3,7 +3,26 @@ use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-pub(super) fn resolve_framework_calls(tx: &Transaction<'_>) -> Result<()> {
+#[derive(Default, Debug, serde::Serialize)]
+pub struct Counts {
+    pub files_indexed: i64,
+    pub calls_resolved: usize,
+}
+
+pub(super) fn files(tx: &Transaction<'_>) -> Result<i64> {
+    Ok(tx.query_row(
+        "SELECT count(DISTINCT file_path) FROM nodes WHERE language='java'",
+        [],
+        |row| row.get(0),
+    )?)
+}
+pub(super) fn resolve_framework_calls(tx: &Transaction<'_>) -> Result<(Counts, Counts)> {
+    let mut spring = Counts {
+        files_indexed: files(tx)?,
+        ..Default::default()
+    };
+    let mut temporal_counts = Counts::default();
+    let mut handled = std::collections::HashSet::new();
     let mut reads=tx.prepare("SELECT c.id,c.target_qualified,c.extra,src.is_test,f.kind,f.target_qualified,json_extract(f.extra,'$.java_type')
         FROM edges f JOIN nodes owner ON owner.qualified_name=f.source_qualified AND owner.language='java'
         JOIN nodes src ON src.file_path=owner.file_path AND src.parent_name=owner.name
@@ -25,6 +44,12 @@ pub(super) fn resolve_framework_calls(tx: &Transaction<'_>) -> Result<()> {
         let mut extra: Value = serde_json::from_str(&r.get::<_, String>(2)?)?;
         let test: bool = r.get(3)?;
         let temporal = r.get::<_, String>(4)? == "TEMPORAL_STUB";
+        if handled.contains(&id)
+            || extra["spring_resolved"] == true
+            || (temporal && extra["temporal_resolved"] == true)
+        {
+            continue;
+        }
         let injected: String = r.get(5)?;
         let java_type: Option<String> = r.get(6)?;
         let qualified_type = java_type.as_deref().unwrap_or(&injected);
@@ -78,9 +103,11 @@ pub(super) fn resolve_framework_calls(tx: &Transaction<'_>) -> Result<()> {
             target = row.get(0)?;
         }
         if temporal {
+            temporal_counts.calls_resolved += 1;
             extra["temporal_resolved"] = json!(true);
             extra["temporal_interface"] = json!(injected);
         } else {
+            spring.calls_resolved += 1;
             extra["spring_resolved"] = json!(true);
             extra["injected_type"] = json!(injected);
             if let Some(t) = java_type {
@@ -88,6 +115,7 @@ pub(super) fn resolve_framework_calls(tx: &Transaction<'_>) -> Result<()> {
             }
         }
         change.execute(params![target, extra.to_string(), id])?;
+        handled.insert(id);
     }
-    Ok(())
+    Ok((spring, temporal_counts))
 }

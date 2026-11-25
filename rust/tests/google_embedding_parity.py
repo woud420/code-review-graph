@@ -141,7 +141,9 @@ def scenario(command, root, env, server, seed):
             embedding_provider="google",
             embedding_model="gemini-embedding-001",
         )
-        res = tool("refresh", "run_postprocess_tool", **refresh)["structuredContent"]
+        refresh_response = tool("refresh", "run_postprocess_tool", **refresh)
+        assert "structuredContent" in refresh_response, refresh_response
+        res = refresh_response["structuredContent"]
         assert res["embeddings_purged"] == 1 and res["embeddings_refreshed"] == 1, res
         outcomes["refreshed"] = snapshot(db)
         res = embed("bad", model="bad-request")

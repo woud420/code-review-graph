@@ -5,6 +5,21 @@ use tree_sitter::Node;
 
 pub(super) fn extract(root: Node<'_>, source: &str, path: &Path) -> ParsedFile {
     let mut file = ParsedFile::default();
+    let mut cursor = root.walk();
+    file.syntax.rust_module_items = root
+        .named_children(&mut cursor)
+        .filter(|node| {
+            matches!(
+                node.kind(),
+                "struct_item"
+                    | "enum_item"
+                    | "trait_item"
+                    | "function_item"
+                    | "function_signature_item"
+            )
+        })
+        .filter_map(|node| field(node, "name", source).map(str::to_owned))
+        .collect();
     let test_file = crate::model::test_file(&path.to_string_lossy(), None);
     walk(root, source, &mut file, "", "<module>", test_file);
     let names: std::collections::HashSet<_> =
@@ -102,8 +117,20 @@ pub(crate) fn doc(node: Node<'_>, source: &str) -> Option<String> {
         }
     }
     lines.reverse();
-    let s = lines
-        .iter()
+    static PARAGRAPH_TAG: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)</?(?:p|para)(?:\s[^>]*)?>").unwrap());
+    static INLINE_TAG: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)\{@(?:code|literal|link)\s+([^}]+)\}").unwrap()
+    });
+    static XML_TAG: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"<[^>]+>").unwrap());
+    let raw = lines.join("\n");
+    let paragraphs = PARAGRAPH_TAG.replace_all(&raw, "\n\n");
+    let inline = INLINE_TAG.replace_all(&paragraphs, "$1");
+    let text = XML_TAG.replace_all(&inline, " ");
+    let s = text
+        .lines()
+        .map(str::trim)
         .skip_while(|s| s.is_empty())
         .take_while(|s| !s.is_empty() && !s.starts_with("@param") && !s.starts_with("@return"))
         .flat_map(|s| s.split_whitespace())

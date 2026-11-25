@@ -40,6 +40,22 @@ jobs:
           path: code-review-graph-*.tar.gz
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: code-review-graph-native-source
+          path: target/package/code-review-graph-rs-*.crate
+          if-no-files-found: error
+
+  architecture:
+    name: Rust architecture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup component add rust-analyzer
+      - run: cargo install --locked --git https://github.com/deterministic-machines/deslop-please --rev f678d10d6e6860e70900ceae919e2d769b0a11ae deslop-please
+      - run: make architecture
+
   container:
     name: Standalone container
     runs-on: ubuntu-latest

@@ -29,6 +29,12 @@ fn module_source(file: &Path, source: &str) -> Option<PathBuf> {
     Some(parts)
 }
 
+#[derive(Default, Debug, serde::Serialize)]
+pub struct Counts {
+    pub references_resolved: i64,
+    pub imports_resolved: i64,
+}
+
 #[derive(Default)]
 pub(super) struct Modules {
     files: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
@@ -74,6 +80,7 @@ impl Modules {
         if self.files.is_empty() {
             return Ok(());
         }
+        tx.execute_batch("CREATE TEMP TABLE hcl_reparsed(file TEXT PRIMARY KEY); INSERT INTO hcl_reparsed SELECT file FROM affected")?;
         let mut changed =
             tx.prepare("SELECT file FROM affected WHERE file GLOB '*.tf' OR file GLOB '*.hcl'")?;
         let dirs = changed
@@ -101,6 +108,25 @@ impl Modules {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn counts(&self, tx: &Transaction<'_>, full: bool) -> Result<Counts> {
+        if self.files.is_empty() {
+            return Ok(Counts::default());
+        }
+        let counted = if full {
+            "SELECT count(*) FILTER(WHERE kind='REFERENCES'),count(*) FILTER(WHERE kind='IMPORTS_FROM') FROM imported WHERE hcl_rebound"
+        } else {
+            "SELECT count(*) FILTER(WHERE i.kind='REFERENCES'),count(*) FILTER(WHERE i.kind='IMPORTS_FROM') FROM imported i
+             WHERE i.hcl_rebound AND (EXISTS(SELECT 1 FROM hcl_reparsed r WHERE r.file=i.path)
+             OR NOT EXISTS(SELECT 1 FROM edges e WHERE e.kind=i.kind AND e.source_qualified=i.source AND e.target_qualified=i.target AND e.file_path=i.path AND e.line=i.line))"
+        };
+        Ok(tx.query_row(counted, [], |r| {
+            Ok(Counts {
+                references_resolved: r.get(0)?,
+                imports_resolved: r.get(1)?,
+            })
+        })?)
     }
 
     fn resolve<'a>(&'a self, file: &Path, name: &str) -> Option<&'a PathBuf> {
@@ -133,17 +159,10 @@ impl Modules {
     pub(super) fn edges(&self, tx: &Transaction<'_>, path: &str, facts: &HclFacts) -> Result<()> {
         let file = Path::new(path);
         for (raw, line) in &facts.modules {
-            edge(
-                tx,
-                "IMPORTS_FROM",
-                path,
-                &self.import(file, raw),
-                path,
-                *line,
-                None,
-            )?;
+            let target = self.import(file, raw);
+            tx.prepare_cached("INSERT OR IGNORE INTO imported(kind,source,target,path,line,hcl_rebound) VALUES('IMPORTS_FROM',?1,?2,?1,?3,?4)")?.execute(params![path,target,*line as i64,target!=*raw])?;
         }
-        let mut save=tx.prepare_cached("INSERT OR IGNORE INTO imported(kind,source,target,path,line,resolution,extra) VALUES('REFERENCES',?,?,?,?,?,?)")?;
+        let mut save=tx.prepare_cached("INSERT OR IGNORE INTO imported(kind,source,target,path,line,resolution,extra,hcl_rebound) VALUES('REFERENCES',?,?,?,?,?,?,?)")?;
         for (owner, name, line) in &facts.references {
             let (target, resolution, extra) = if let Some(found) = self.resolve(file, name) {
                 (
@@ -164,7 +183,8 @@ impl Modules {
                 path,
                 *line as i64,
                 resolution,
-                extra.to_string()
+                extra.to_string(),
+                resolution == "direct" && target != qualified(path, name)
             ])?;
         }
         Ok(())

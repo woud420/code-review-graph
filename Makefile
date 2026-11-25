@@ -29,6 +29,10 @@ check: lint typecheck test
 clean:
 	cargo clean
 
+.PHONY: architecture
+architecture:
+	deslop-please --all-features
+
 REFERENCE ?= .
 PYTHON ?= python3
 TARGET_DIR := $(abspath $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target))
@@ -40,6 +44,10 @@ parity:
 	cargo build --workspace --bins --locked
 	"$(PYTHON)" -B rust/tests/cfamily_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/java_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
+	"$(PYTHON)" -B rust/tests/java_events_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/rescript_modules_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/java_aop_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
+	"$(PYTHON)" -B rust/tests/resolver_counts_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph"
 	"$(PYTHON)" -B rust/tests/php_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/lua_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"
 	"$(PYTHON)" -B rust/tests/extended_languages_parity.py --upstream "$(REFERENCE)" --binary "$(TARGET_DIR)/debug/code-review-graph" --proof-binary "$(TARGET_DIR)/debug/code-review-graph-rs"

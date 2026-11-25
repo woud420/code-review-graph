@@ -1,3 +1,4 @@
+mod aop;
 mod communities;
 mod cpp;
 mod flows;
@@ -5,7 +6,9 @@ pub use flows::{RemovedFlowNode, conventional_entry, removed_flow_scores};
 mod fts;
 mod java;
 mod patterns;
+mod rescript;
 mod rust;
+mod spring_events;
 
 use anyhow::Result;
 use rusqlite::{Transaction, params};
@@ -22,6 +25,12 @@ pub enum Level {
 
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
+    pub spring: java::Counts,
+    pub temporal: java::Counts,
+    pub hcl: super::hcl::Counts,
+    pub rescript: rescript::Summary,
+    pub event: Option<spring_events::EventResolution>,
+    pub aop: aop::Summary,
     pub timing: std::collections::BTreeMap<String, f64>,
     pub bare_edges_resolved: usize,
     pub cpp_scoped_edges_resolved: usize,
@@ -276,9 +285,34 @@ struct Stages {
     communities: bool,
 }
 
+fn java_changed(tx: &Transaction<'_>, full: bool) -> Result<bool> {
+    if full {
+        return Ok(true);
+    }
+    let changes = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name='original_changes')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(changes
+        && tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM original_changes WHERE lower(file) GLOB '*.java')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?)
+}
+
 fn compute(tx: &Transaction<'_>, stages: Stages, full: bool) -> Result<Report> {
-    let mut report = Report::default();
-    java::resolve_framework_calls(tx)?;
+    let mut report = Report {
+        rescript: rescript::resolve(tx)?,
+        ..Report::default()
+    };
+    (report.spring, report.temporal) = java::resolve_framework_calls(tx)?;
+    if java_changed(tx, full)? {
+        report.aop = aop::resolve(tx)?;
+        report.event = Some(spring_events::resolve(tx)?);
+    }
+    report.temporal.files_indexed = java::files(tx)?;
     rust::resolve(tx)?;
     let entities = if !stages.resolve {
         Vec::new()

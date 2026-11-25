@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SyntaxFacts {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rust_module_items: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_language: Option<String>,
     #[serde(default)]

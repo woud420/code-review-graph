@@ -88,6 +88,22 @@ def main():
             },
         )
     )
+    fixtures.append(("inline_names_and_chain", {
+        "Cargo.toml": '[package]\nname = "sample"\nversion = "0.1.0"\nedition = "2021"\n',
+        "src/lib.rs": """/// A Box<T> document. <p>Other details.
+#[derive(Debug)]
+pub struct Parcel;
+impl Parcel {
+    pub fn open() -> Self { Self }
+}
+mod checks {
+    use super::*;
+    fn open() -> Option<Parcel> { Some(Parcel::open()) }
+    #[test]
+    fn exercise() { open(); Parcel::open().missing(); }
+}
+""",
+    }))
     count = 0
     with tempfile.TemporaryDirectory(prefix="crg-rust-scoped-") as t:
         data = Path(t).resolve()
@@ -110,14 +126,22 @@ def main():
                 subprocess.run(
                     [*cli, "build", "-q", "--repo", str(root)], cwd=root, env=cfg, check=True
                 )
-                results.append(calls(path / "graph.db"))
+                database = path / "graph.db"
+                results.append(calls(database))
+                if name == "inline_names_and_chain":
+                    with sqlite3.connect(database) as db:
+                        doc = db.execute("SELECT docstring FROM nodes WHERE name='Parcel'").fetchone()
+                    assert doc == ("A Box document.",), doc
             assert results[0] and results[0] == results[1], (name, results)
             if name == "cargo_module_cache":
                 targets = [r[1] for r in results[0] if r[0].endswith("folder/mod.rs::run")]
                 assert len(targets) == 1 and targets[0].endswith("folder/mod.rs::ping"), targets
+            if name == "inline_names_and_chain":
+                targets = {row[1] for row in results[0] if row[0].endswith("::exercise")}
+                assert "missing" in targets and any(t.endswith("::Parcel.open") for t in targets), targets
             count += len(results[0])
     print(
-        f"{release_fixtures} upstream Rust fixtures and one Cargo directory-cache fixture matched {count} call/test edges, confidence and receiver evidence."
+        f"{release_fixtures} upstream Rust fixtures and two Cargo regression fixtures matched {count} call/test edges, confidence and receiver evidence."
     )
 
 

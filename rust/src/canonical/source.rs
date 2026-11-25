@@ -67,7 +67,11 @@ impl<'a> Source<'a> {
                 ));
             }
             let (owner, name) = callee.split_once("::")?;
-            if !name.contains("::")
+            let identifier = name.strip_prefix("r#").unwrap_or(name);
+            if !identifier.is_empty()
+                && identifier
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_alphanumeric())
                 && facts
                     .symbols
                     .iter()
@@ -190,6 +194,19 @@ impl<'a> Source<'a> {
             let line = node.start_position().row + 1;
             result.import_details.observe(node, source, language);
             match node.kind() {
+                "struct_item" | "enum_item" | "trait_item" if language == "rust" => {
+                    if let Some(name) = field(node, "name", source)
+                        && let Some(doc) = crate::parser::rust::doc(node, source)
+                    {
+                        result.declarations.insert(
+                            (line, name.into()),
+                            Declaration {
+                                doc: Some(doc),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
                 "function_definition"
                 | "function_item"
                 | "function_signature_item"
